@@ -1,0 +1,730 @@
+#!/usr/bin/env bash
+# gcpctx — manage gcloud ADC + project contexts (folder / CLI / env API)
+set -eo pipefail
+
+GCPCTX_HOME="${GCPCTX_HOME:-$HOME/.gcpctx}"
+CONTEXTS_DIR="$GCPCTX_HOME/contexts"
+ACTIVE_FILE="$GCPCTX_HOME/active"
+GCLOUD_ADC="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/application_default_credentials.json"
+MARKER_NAME=".gcpctx"
+VERSION="0.1.0"
+
+usage() {
+  cat <<'EOF'
+gcpctx — switch GCP account/project/ADC safely
+
+Usage:
+  gcpctx init [--name NAME] [--project PROJECT] [--account ACCOUNT]
+              [--region REGION] [--zone ZONE] [--gcloud-config NAME]
+  gcpctx login [NAME]
+  gcpctx use <name>
+  gcpctx activate
+  gcpctx deactivate
+  gcpctx list
+  gcpctx current [--json] [--prompt]
+  gcpctx env [--export]
+  gcpctx exec [--] <command>...
+  gcpctx doctor
+  gcpctx bootstrap          # import from existing gcloud configurations
+  gcpctx sync-adc [NAME]    # copy context credentials to well-known ADC path
+  gcpctx which
+  gcpctx version
+  gcpctx help
+
+Shell activation (required for env in your interactive shell):
+  eval "$(gcpctx use dev --export)"
+  eval "$(gcpctx activate --export)"
+  eval "$(gcpctx deactivate --export)"
+
+Or install the zsh wrapper from shell/gcpctx.zsh so use/activate/deactivate
+auto-eval without typing eval.
+
+Folder marker:
+  ./.gcpctx  →  {"name":"dev"}
+
+App / API env vars set on activate:
+  GOOGLE_APPLICATION_CREDENTIALS
+  GOOGLE_CLOUD_PROJECT
+  GOOGLE_CLOUD_QUOTA_PROJECT
+  CLOUDSDK_CORE_PROJECT
+  CLOUDSDK_ACTIVE_CONFIG_NAME
+  GCPCTX_NAME
+EOF
+}
+
+die() { echo "gcpctx: $*" >&2; exit 1; }
+info() { echo "gcpctx: $*" >&2; }
+
+ensure_dirs() {
+  mkdir -p "$CONTEXTS_DIR"
+}
+
+json_get() {
+  # json_get <file> <key>
+  local file="$1" key="$2"
+  python3 -c '
+import json, sys
+path, key = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    data = json.load(f)
+val = data.get(key, "")
+if val is None:
+    val = ""
+print(val)
+' "$file" "$key"
+}
+
+json_write_meta() {
+  local path="$1"
+  shift
+  python3 -c '
+import json, sys
+path = sys.argv[1]
+keys = sys.argv[2::2]
+vals = sys.argv[3::2]
+data = {}
+try:
+    with open(path) as f:
+        data = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    data = {}
+for k, v in zip(keys, vals):
+    data[k] = v
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+' "$path" "$@"
+}
+
+context_dir() {
+  echo "$CONTEXTS_DIR/$1"
+}
+
+context_meta() {
+  echo "$(context_dir "$1")/meta.json"
+}
+
+context_creds() {
+  echo "$(context_dir "$1")/credentials.json"
+}
+
+context_exists() {
+  [[ -f "$(context_meta "$1")" ]]
+}
+
+require_context() {
+  context_exists "$1" || die "unknown context '$1' (try: gcpctx list)"
+}
+
+read_active_name() {
+  if [[ -n "${GCPCTX_NAME:-}" ]]; then
+    echo "$GCPCTX_NAME"
+    return
+  fi
+  if [[ -f "$ACTIVE_FILE" ]]; then
+    tr -d '[:space:]' < "$ACTIVE_FILE"
+  fi
+}
+
+find_marker() {
+  local dir="$PWD"
+  while true; do
+    if [[ -f "$dir/$MARKER_NAME" ]]; then
+      echo "$dir/$MARKER_NAME"
+      return 0
+    fi
+    if [[ "$dir" == "/" ]]; then
+      return 1
+    fi
+    dir="$(dirname "$dir")"
+  done
+}
+
+marker_name() {
+  local marker
+  marker="$(find_marker)" || return 1
+  python3 -c '
+import json, sys
+path = sys.argv[1]
+raw = open(path).read().strip()
+if not raw:
+    sys.exit(1)
+if raw.startswith("{"):
+    data = json.loads(raw)
+    name = data.get("name") or data.get("context")
+else:
+    name = raw.split()[0]
+if not name:
+    sys.exit(1)
+print(name)
+' "$marker"
+}
+
+ensure_gcloud_config() {
+  local name="$1" account="$2" project="$3" region="$4" zone="$5"
+  if ! gcloud config configurations describe "$name" &>/dev/null; then
+    gcloud config configurations create "$name" --quiet >/dev/null
+  fi
+  gcloud --configuration="$name" config set account "$account" --quiet >/dev/null
+  gcloud --configuration="$name" config set project "$project" --quiet >/dev/null
+  if [[ -n "$region" ]]; then
+    gcloud --configuration="$name" config set compute/region "$region" --quiet >/dev/null || true
+  fi
+  if [[ -n "$zone" ]]; then
+    gcloud --configuration="$name" config set compute/zone "$zone" --quiet >/dev/null || true
+  fi
+}
+
+activate_gcloud_config() {
+  local name="$1"
+  gcloud config configurations activate "$name" --quiet >/dev/null
+}
+
+sync_well_known_adc() {
+  local name="$1"
+  local creds
+  creds="$(context_creds "$name")"
+  [[ -f "$creds" ]] || die "no credentials for '$name' (run: gcpctx login $name)"
+  mkdir -p "$(dirname "$GCLOUD_ADC")"
+  cp "$creds" "$GCLOUD_ADC"
+  chmod 600 "$GCLOUD_ADC"
+}
+
+print_exports() {
+  local name="$1"
+  require_context "$name"
+  local meta creds project account quota gcloud_config region
+  meta="$(context_meta "$name")"
+  creds="$(context_creds "$name")"
+  [[ -f "$creds" ]] || die "no credentials for '$name' (run: gcpctx login $name)"
+  project="$(json_get "$meta" project)"
+  account="$(json_get "$meta" account)"
+  quota="$(json_get "$meta" quota_project)"
+  gcloud_config="$(json_get "$meta" gcloud_config)"
+  [[ -n "$quota" ]] || quota="$project"
+  [[ -n "$gcloud_config" ]] || gcloud_config="$name"
+
+  # Update quota_project_id inside credentials copy used for ADC
+  python3 -c '
+import json, sys
+path, quota = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    data = json.load(f)
+if quota:
+    data["quota_project_id"] = quota
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+' "$creds" "$quota"
+
+  sync_well_known_adc "$name"
+  activate_gcloud_config "$gcloud_config"
+  echo "$name" > "$ACTIVE_FILE"
+
+  cat <<EOF
+export GCPCTX_NAME=$(printf '%q' "$name")
+export GCPCTX_HOME=$(printf '%q' "$GCPCTX_HOME")
+export GOOGLE_APPLICATION_CREDENTIALS=$(printf '%q' "$creds")
+export GOOGLE_CLOUD_PROJECT=$(printf '%q' "$project")
+export GCLOUD_PROJECT=$(printf '%q' "$project")
+export GOOGLE_CLOUD_QUOTA_PROJECT=$(printf '%q' "$quota")
+export CLOUDSDK_CORE_PROJECT=$(printf '%q' "$project")
+export CLOUDSDK_ACTIVE_CONFIG_NAME=$(printf '%q' "$gcloud_config")
+EOF
+}
+
+print_deactivate_exports() {
+  rm -f "$ACTIVE_FILE"
+  cat <<'EOF'
+unset GCPCTX_NAME
+unset GOOGLE_APPLICATION_CREDENTIALS
+unset GOOGLE_CLOUD_PROJECT
+unset GCLOUD_PROJECT
+unset GOOGLE_CLOUD_QUOTA_PROJECT
+unset CLOUDSDK_CORE_PROJECT
+unset CLOUDSDK_ACTIVE_CONFIG_NAME
+EOF
+}
+
+want_export=false
+
+cmd_init() {
+  ensure_dirs
+  local name="" project="" account="" region="me-west1" zone="me-west1-c" gcloud_config=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      --project) project="$2"; shift 2 ;;
+      --account) account="$2"; shift 2 ;;
+      --region) region="$2"; shift 2 ;;
+      --zone) zone="$2"; shift 2 ;;
+      --gcloud-config) gcloud_config="$2"; shift 2 ;;
+      *) die "unknown init flag: $1" ;;
+    esac
+  done
+
+  [[ -n "$project" ]] || project="$(gcloud config get-value project 2>/dev/null || true)"
+  [[ -n "$account" ]] || account="$(gcloud config get-value account 2>/dev/null || true)"
+  [[ -n "$name" ]] || name="$project"
+  [[ -n "$name" ]] || die "need --name (or an active gcloud project)"
+  [[ -n "$project" ]] || die "need --project"
+  [[ -n "$account" ]] || die "need --account"
+  [[ -n "$gcloud_config" ]] || gcloud_config="$name"
+
+  local dir meta
+  dir="$(context_dir "$name")"
+  meta="$(context_meta "$name")"
+  mkdir -p "$dir"
+  json_write_meta "$meta" \
+    name "$name" \
+    account "$account" \
+    project "$project" \
+    quota_project "$project" \
+    region "$region" \
+    zone "$zone" \
+    gcloud_config "$gcloud_config"
+
+  ensure_gcloud_config "$gcloud_config" "$account" "$project" "$region" "$zone"
+
+  python3 -c '
+import json, sys
+name = sys.argv[1]
+with open(".gcpctx", "w") as f:
+    json.dump({"name": name}, f, indent=2)
+    f.write("\n")
+' "$name"
+
+  info "created context '$name' (project=$project account=$account)"
+  info "wrote ./.gcpctx → {\"name\":\"$name\"}"
+  info "next: gcpctx login $name"
+}
+
+cmd_login() {
+  ensure_dirs
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    name="$(read_active_name)"
+  fi
+  if [[ -z "$name" ]]; then
+    name="$(marker_name 2>/dev/null || true)"
+  fi
+  [[ -n "$name" ]] || die "specify context: gcpctx login <name>"
+  require_context "$name"
+
+  local meta project account quota creds
+  meta="$(context_meta "$name")"
+  project="$(json_get "$meta" project)"
+  account="$(json_get "$meta" account)"
+  quota="$(json_get "$meta" quota_project)"
+  [[ -n "$quota" ]] || quota="$project"
+  creds="$(context_creds "$name")"
+
+  info "logging in for context '$name' (account=$account project=$project)"
+  info "browser will open — sign in as: $account"
+
+  # Ensure gcloud CLI session for this account first (non-ADC)
+  if ! gcloud auth list --filter="status:ACTIVE AND account:$account" --format='value(account)' 2>/dev/null | grep -qx "$account"; then
+    gcloud auth login "$account" --brief || true
+  fi
+
+  # Login writes to well-known ADC; we then copy into context store
+  gcloud auth application-default login --quota-project="$quota"
+
+  [[ -f "$GCLOUD_ADC" ]] || die "ADC file not created at $GCLOUD_ADC"
+  cp "$GCLOUD_ADC" "$creds"
+  chmod 600 "$creds"
+
+  # Force quota project + account annotation in stored credentials
+  python3 -c '
+import json, sys
+path, quota, account = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    data = json.load(f)
+data["quota_project_id"] = quota
+if account:
+    data["account"] = account
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+' "$creds" "$quota" "$account"
+
+  info "saved credentials → $creds"
+  info "activate with: gcpctx use $name"
+}
+
+cmd_use() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: gcpctx use <name>"
+  require_context "$name"
+  if $want_export; then
+    print_exports "$name"
+  else
+    # Still perform side effects, tell user to export
+    print_exports "$name" >/dev/null
+    # Re-run to show? print_exports already did side effects once.
+    # Actually first call consumed stdout to /dev/null but did the work.
+    # Re-print for eval convenience message.
+    info "activated '$name' (files updated). To set env in this shell:"
+    info "  eval \"\$(gcpctx use $name --export)\""
+    info "Or install shell/gcpctx.zsh wrapper."
+    # Print current for humans
+    cmd_current
+  fi
+}
+
+cmd_activate() {
+  local name
+  name="$(marker_name)" || die "no .gcpctx marker found upward from $PWD"
+  if $want_export; then
+    print_exports "$name"
+  else
+    print_exports "$name" >/dev/null
+    info "activated '$name' from .gcpctx. To set env in this shell:"
+    info "  eval \"\$(gcpctx activate --export)\""
+    cmd_current
+  fi
+}
+
+cmd_deactivate() {
+  if $want_export; then
+    print_deactivate_exports
+  else
+    print_deactivate_exports >/dev/null
+    info "deactivated. To clear env in this shell:"
+    info "  eval \"\$(gcpctx deactivate --export)\""
+  fi
+}
+
+cmd_list() {
+  ensure_dirs
+  local active
+  active="$(read_active_name)"
+  local d name meta project account flag
+  printf "%-12s %-36s %-40s %s\n" "NAME" "PROJECT" "ACCOUNT" "CREDS"
+  shopt -s nullglob
+  for d in "$CONTEXTS_DIR"/*/; do
+    name="$(basename "$d")"
+    meta="$(context_meta "$name")"
+    [[ -f "$meta" ]] || continue
+    project="$(json_get "$meta" project)"
+    account="$(json_get "$meta" account)"
+    flag="missing"
+    [[ -f "$(context_creds "$name")" ]] && flag="ok"
+    if [[ "$name" == "$active" ]]; then
+      printf "%-12s %-36s %-40s %s\n" "$name*" "$project" "$account" "$flag"
+    else
+      printf "%-12s %-36s %-40s %s\n" "$name" "$project" "$account" "$flag"
+    fi
+  done
+}
+
+cmd_current() {
+  local mode="text"
+  case "${1:-}" in
+    --json) mode="json" ;;
+    --prompt) mode="prompt" ;;
+    "") ;;
+    *) die "usage: gcpctx current [--json|--prompt]" ;;
+  esac
+
+  local name
+  name="$(read_active_name)"
+  if [[ -z "$name" ]]; then
+    if [[ "$mode" == "prompt" ]]; then
+      exit 0
+    fi
+    if [[ "$mode" == "json" ]]; then
+      echo '{"active":false}'
+      exit 0
+    fi
+    echo "no active gcpctx context"
+    exit 0
+  fi
+
+  require_context "$name"
+  local meta creds project account quota gcloud_config
+  meta="$(context_meta "$name")"
+  creds="$(context_creds "$name")"
+  project="$(json_get "$meta" project)"
+  account="$(json_get "$meta" account)"
+  quota="$(json_get "$meta" quota_project)"
+  gcloud_config="$(json_get "$meta" gcloud_config)"
+  [[ -n "$quota" ]] || quota="$project"
+
+  case "$mode" in
+    prompt)
+      printf 'gcp:%s' "$name"
+      ;;
+    json)
+      python3 -c '
+import json, sys, os
+print(json.dumps({
+  "active": True,
+  "name": sys.argv[1],
+  "account": sys.argv[2],
+  "project": sys.argv[3],
+  "quota_project": sys.argv[4],
+  "gcloud_config": sys.argv[5],
+  "credentials_path": sys.argv[6],
+  "credentials_present": os.path.isfile(sys.argv[6]),
+}, indent=2))
+' "$name" "$account" "$project" "$quota" "$gcloud_config" "$creds"
+      ;;
+    text)
+      cat <<EOF
+name:        $name
+account:     $account
+project:     $project
+quota:       $quota
+gcloud:      $gcloud_config
+credentials: $creds
+EOF
+      ;;
+  esac
+}
+
+cmd_env() {
+  local name
+  name="$(read_active_name)"
+  [[ -n "$name" ]] || die "no active context (gcpctx use <name>)"
+  # Force export style for env command when --export or default printable
+  want_export=true
+  print_exports "$name"
+}
+
+cmd_exec() {
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+  [[ $# -gt 0 ]] || die "usage: gcpctx exec -- <command>..."
+  local name
+  name="$(read_active_name)"
+  if [[ -z "$name" ]]; then
+    name="$(marker_name 2>/dev/null || true)"
+  fi
+  [[ -n "$name" ]] || die "no context (use .gcpctx or gcpctx use)"
+  # Apply env in a subshell
+  # shellcheck disable=SC1090
+  eval "$(print_exports "$name")"
+  exec "$@"
+}
+
+cmd_doctor() {
+  local issues=0
+  local name project account quota gcloud_config creds
+  name="$(read_active_name)"
+
+  echo "gcpctx doctor"
+  echo "-------------"
+  echo "GCPCTX_HOME=$GCPCTX_HOME"
+  echo "active_file=$( [[ -f $ACTIVE_FILE ]] && cat "$ACTIVE_FILE" || echo '(none)' )"
+  echo "env GCPCTX_NAME=${GCPCTX_NAME:-"(unset)"}"
+  echo "env GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-"(unset)"}"
+  echo "env GOOGLE_CLOUD_QUOTA_PROJECT=${GOOGLE_CLOUD_QUOTA_PROJECT:-"(unset)"}"
+  echo "env GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-"(unset)"}"
+  echo "env CLOUDSDK_ACTIVE_CONFIG_NAME=${CLOUDSDK_ACTIVE_CONFIG_NAME:-"(unset)"}"
+
+  local g_account g_project g_config
+  g_account="$(gcloud config get-value account 2>/dev/null || true)"
+  g_project="$(gcloud config get-value project 2>/dev/null || true)"
+  g_config="$(cat "${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/active_config" 2>/dev/null || true)"
+  echo "gcloud account=$g_account project=$g_project configuration=$g_config"
+
+  local adc_quota=""
+  if [[ -f "$GCLOUD_ADC" ]]; then
+    adc_quota="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("quota_project_id",""))' "$GCLOUD_ADC")"
+    echo "well-known ADC quota_project_id=$adc_quota"
+  else
+    echo "well-known ADC: missing"
+    issues=$((issues + 1))
+  fi
+
+  if [[ -z "$name" ]]; then
+    echo "WARN: no active gcpctx context"
+    issues=$((issues + 1))
+  else
+    require_context "$name"
+    local meta
+    meta="$(context_meta "$name")"
+    creds="$(context_creds "$name")"
+    project="$(json_get "$meta" project)"
+    account="$(json_get "$meta" account)"
+    quota="$(json_get "$meta" quota_project)"
+    gcloud_config="$(json_get "$meta" gcloud_config)"
+    [[ -n "$quota" ]] || quota="$project"
+    echo "context $name → project=$project account=$account quota=$quota gcloud=$gcloud_config"
+
+    [[ -f "$creds" ]] || { echo "ERROR: missing credentials $creds"; issues=$((issues + 1)); }
+
+    if [[ -n "${GOOGLE_CLOUD_PROJECT:-}" && "$GOOGLE_CLOUD_PROJECT" != "$project" ]]; then
+      echo "ERROR: GOOGLE_CLOUD_PROJECT ($GOOGLE_CLOUD_PROJECT) != context project ($project)"
+      issues=$((issues + 1))
+    fi
+    if [[ -n "${GOOGLE_CLOUD_QUOTA_PROJECT:-}" && "$GOOGLE_CLOUD_QUOTA_PROJECT" != "$quota" ]]; then
+      echo "ERROR: GOOGLE_CLOUD_QUOTA_PROJECT ($GOOGLE_CLOUD_QUOTA_PROJECT) != context quota ($quota)"
+      issues=$((issues + 1))
+    fi
+    if [[ "$g_project" != "$project" ]]; then
+      echo "ERROR: gcloud project ($g_project) != context project ($project)"
+      issues=$((issues + 1))
+    fi
+    if [[ "$g_account" != "$account" ]]; then
+      echo "ERROR: gcloud account ($g_account) != context account ($account)"
+      issues=$((issues + 1))
+    fi
+    if [[ -n "$adc_quota" && "$adc_quota" != "$quota" ]]; then
+      echo "ERROR: ADC quota_project_id ($adc_quota) != context quota ($quota)"
+      issues=$((issues + 1))
+    fi
+    if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" && "$GOOGLE_APPLICATION_CREDENTIALS" != "$creds" ]]; then
+      echo "ERROR: GOOGLE_APPLICATION_CREDENTIALS points elsewhere"
+      issues=$((issues + 1))
+    fi
+  fi
+
+  if [[ "$issues" -eq 0 ]]; then
+    echo "OK: no mismatches detected"
+  else
+    echo "FAIL: $issues issue(s) — run: eval \"\$(gcpctx use <name> --export)\""
+    exit 1
+  fi
+}
+
+cmd_bootstrap() {
+  ensure_dirs
+  info "importing gcloud configurations into ~/.gcpctx"
+
+  python3 - <<'PY'
+import json, os, shutil, subprocess, pathlib
+
+home = pathlib.Path(os.environ.get("GCPCTX_HOME", pathlib.Path.home() / ".gcpctx"))
+contexts = home / "contexts"
+contexts.mkdir(parents=True, exist_ok=True)
+
+raw = subprocess.check_output(
+    ["gcloud", "config", "configurations", "list", "--format=json"],
+    text=True,
+)
+configs = json.loads(raw)
+
+adc_path = pathlib.Path(
+    os.environ.get("CLOUDSDK_CONFIG", pathlib.Path.home() / ".config" / "gcloud")
+) / "application_default_credentials.json"
+adc = None
+if adc_path.is_file():
+    with open(adc_path) as f:
+        adc = json.load(f)
+
+matched = None
+for cfg in configs:
+    name = cfg.get("name") or ""
+    props = cfg.get("properties") or {}
+    core = props.get("core") or {}
+    compute = props.get("compute") or {}
+    account = core.get("account") or ""
+    project = core.get("project") or ""
+    region = compute.get("region") or "me-west1"
+    zone = compute.get("zone") or "me-west1-c"
+    if not name or not project:
+        print(f"gcpctx: skip '{name}' (missing project)", flush=True)
+        continue
+    d = contexts / name
+    d.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "name": name,
+        "account": account,
+        "project": project,
+        "quota_project": project,
+        "region": region,
+        "zone": zone,
+        "gcloud_config": name,
+    }
+    with open(d / "meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+        f.write("\n")
+    print(f"gcpctx: imported context '{name}' ({account} / {project})", flush=True)
+
+    if adc and (
+        adc.get("quota_project_id") == project
+        or (adc.get("account") and adc.get("account") == account)
+    ):
+        creds = d / "credentials.json"
+        if not creds.exists():
+            shutil.copy2(adc_path, creds)
+            os.chmod(creds, 0o600)
+            with open(creds) as f:
+                data = json.load(f)
+            data["quota_project_id"] = project
+            if account:
+                data["account"] = account
+            with open(creds, "w") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+            print(f"gcpctx: copied current ADC → context '{name}'", flush=True)
+            matched = name
+
+if matched is None and adc:
+    print("gcpctx: current ADC not matched to a context; run gcpctx login <name>", flush=True)
+PY
+
+  info "done. For contexts still missing credentials: gcpctx login <name>"
+  cmd_list
+}
+
+cmd_sync_adc() {
+  local name="${1:-$(read_active_name)}"
+  [[ -n "$name" ]] || die "specify context"
+  require_context "$name"
+  sync_well_known_adc "$name"
+  info "synced $name credentials → $GCLOUD_ADC"
+}
+
+cmd_which() {
+  echo "$GCPCTX_HOME"
+  local name
+  name="$(read_active_name)"
+  if [[ -n "$name" ]]; then
+    echo "$(context_dir "$name")"
+    echo "$(context_creds "$name")"
+  fi
+  if marker="$(find_marker 2>/dev/null)"; then
+    echo "marker: $marker"
+  fi
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  local -a args=()
+  local a
+  want_export=false
+  for a in "$@"; do
+    if [[ "$a" == "--export" ]]; then
+      want_export=true
+    else
+      args+=("$a")
+    fi
+  done
+
+  case "$cmd" in
+    init) cmd_init ${args[@]+"${args[@]}"} ;;
+    login) cmd_login ${args[@]+"${args[@]}"} ;;
+    use) cmd_use ${args[@]+"${args[@]}"} ;;
+    activate) cmd_activate ${args[@]+"${args[@]}"} ;;
+    deactivate) cmd_deactivate ${args[@]+"${args[@]}"} ;;
+    list|ls) cmd_list ${args[@]+"${args[@]}"} ;;
+    current|status) cmd_current ${args[@]+"${args[@]}"} ;;
+    env) cmd_env ${args[@]+"${args[@]}"} ;;
+    exec) cmd_exec ${args[@]+"${args[@]}"} ;;
+    doctor) cmd_doctor ${args[@]+"${args[@]}"} ;;
+    bootstrap) cmd_bootstrap ${args[@]+"${args[@]}"} ;;
+    sync-adc) cmd_sync_adc ${args[@]+"${args[@]}"} ;;
+    which) cmd_which ${args[@]+"${args[@]}"} ;;
+    version|--version|-V) echo "gcpctx $VERSION" ;;
+    help|--help|-h) usage ;;
+    *) die "unknown command '$cmd' (try: gcpctx help)" ;;
+  esac
+}
+
+main "$@"

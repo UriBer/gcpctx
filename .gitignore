@@ -1,0 +1,6 @@
+# gcpctx — private tooling
+.DS_Store
+*.swp
+.env
+credentials.json
+**/credentials.json

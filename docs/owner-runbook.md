@@ -5,23 +5,32 @@ Automations in CI handle most packaging; a few steps need human credentials or o
 
 ## One-time GitHub security
 
+> **Private free-tier limits:** Branch protection, secret scanning, CodeQL, and
+> dependency review require **GitHub Pro** or a **public** repository. Dependency
+> graph / Dependabot may still be toggled in the UI.
+
 1. **Private vulnerability reporting**
    - Settings → Code security → Enable private vulnerability reporting
-   - Or: `gh api -X PUT repos/UriBer/gcpctx/private-vulnerability-reporting`
-2. **Dependency graph / Dependabot alerts** (free on private)
+   - UI path required on some plans (API may 404)
+2. **Dependency graph / Dependabot alerts** (when available)
    - Settings → Code security → Dependency graph → Enable
    - Dependabot alerts → Enable
-3. **Secret scanning** (recommended; GHAS may be required on private)
-4. **Branch protection on `main`**
-   - Require PR reviews (optional while solo)
+3. **Secret scanning** (requires Pro/GHAS on private, free on public)
+4. **Branch protection on `main`** (requires Pro on private, free on public)
    - Require status checks: `verify (ubuntu-latest)`, `verify (macos-latest)`, `verify (windows-latest)`
    - Disallow force pushes
-5. **GHAS-gated workflows** (CodeQL, dependency-review, Scorecard)
-   - Auto-skip while the repo is private
-   - After going public (or buying GHAS), set repo variables:
+5. **Or go public** when ready — unlocks CodeQL / dependency-review / Scorecard / branch protection without Pro
+6. **GHAS-gated workflows** (CodeQL, dependency-review, Scorecard)
+   - Auto-skip while the repo is private (`if: !private || vars.ENABLE_*=true`)
+   - After going public (or buying GHAS), set:
      - `ENABLE_CODEQL=true`
      - `ENABLE_DEPENDENCY_REVIEW=true`
      - `ENABLE_SCORECARD=true`
+
+### Distribution repos created
+
+- https://github.com/UriBer/homebrew-tap — `Formula/gcpctx.rb` (SHA256 pending)
+- https://github.com/UriBer/scoop-gcpctx — `bucket/gcpctx.json` (hash pending)
 
 ## npm publish
 

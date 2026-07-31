@@ -1,0 +1,19 @@
+# Belt-and-suspenders; package.json "files" is the allowlist.
+**credentials**
+**/credentials.json
+**/application_default_credentials.json
+**/*token*
+.env
+.env.*
+*.pem
+*.key
+*.p12
+.gcpctx/
+contexts/
+tmp/
+*.tgz
+.DS_Store
+.git/
+scripts/
+examples/
+install.sh

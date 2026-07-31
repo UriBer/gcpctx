@@ -28,9 +28,12 @@ Usage:
   gcpctx current [--json] [--prompt]
   gcpctx env [--export]
   gcpctx exec [--] <command>...
-  gcpctx doctor
+  gcpctx doctor [--fix]
+  gcpctx secrets fix        # chmod 700/600 on managed credential store
   gcpctx bootstrap          # import from existing gcloud configurations
   gcpctx sync-adc [NAME]    # copy context credentials to well-known ADC path
+  gcpctx shell-setup [--zshrc PATH]
+  gcpctx shell-path
   gcpctx which
   gcpctx version
   gcpctx help
@@ -68,8 +71,116 @@ EOF
 die() { echo "gcpctx: $*" >&2; exit 1; }
 info() { echo "gcpctx: $*" >&2; }
 
+# Resolve install root (symlink-aware) for package.json / shell hooks
+package_root() {
+  local src="${BASH_SOURCE[0]:-$0}"
+  local dir
+  if command -v realpath >/dev/null 2>&1; then
+    src="$(realpath "$src" 2>/dev/null || echo "$src")"
+  elif command -v readlink >/dev/null 2>&1; then
+    local cur="$src"
+    while [[ -L "$cur" ]]; do
+      local link
+      link="$(readlink "$cur")"
+      if [[ "$link" == /* ]]; then
+        cur="$link"
+      else
+        cur="$(dirname "$cur")/$link"
+      fi
+    done
+    src="$cur"
+  fi
+  dir="$(cd "$(dirname "$src")/.." && pwd)"
+  if [[ -f "$dir/shell/gcpctx.zsh" || -f "$dir/package.json" ]]; then
+    echo "$dir"
+    return 0
+  fi
+  if [[ -n "${GCPCTX_PACKAGE_ROOT:-}" && -f "${GCPCTX_PACKAGE_ROOT}/shell/gcpctx.zsh" ]]; then
+    echo "$GCPCTX_PACKAGE_ROOT"
+    return 0
+  fi
+  if command -v npm >/dev/null 2>&1; then
+    local npm_pkg
+    npm_pkg="$(npm root -g 2>/dev/null)/gcpctx"
+    if [[ -f "$npm_pkg/shell/gcpctx.zsh" ]]; then
+      echo "$npm_pkg"
+      return 0
+    fi
+  fi
+  # Last resort: empty — callers must handle
+  echo "$dir"
+}
+
+read_package_version() {
+  local root pkg
+  root="$(package_root)"
+  pkg="$root/package.json"
+  if [[ -f "$pkg" ]]; then
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "$pkg" 2>/dev/null || true
+  fi
+}
+
 ensure_dirs() {
-  mkdir -p "$CONTEXTS_DIR"
+  mkdir -p -m 700 "$GCPCTX_HOME"
+  mkdir -p -m 700 "$CONTEXTS_DIR"
+  mkdir -p -m 700 "$GCPCTX_HOME/tmp"
+  chmod 700 "$GCPCTX_HOME" "$CONTEXTS_DIR" "$GCPCTX_HOME/tmp" 2>/dev/null || true
+}
+
+secure_file_600() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  chmod 600 "$f" 2>/dev/null || true
+}
+
+secure_dir_700() {
+  local d="$1"
+  [[ -d "$d" ]] || return 0
+  chmod 700 "$d" 2>/dev/null || true
+}
+
+file_mode_octal() {
+  local f="$1"
+  if stat -f '%OLp' "$f" >/dev/null 2>&1; then
+    stat -f '%OLp' "$f"
+  else
+    stat -c '%a' "$f"
+  fi
+}
+
+mode_too_open() {
+  # true if group/other have any permission bits
+  local mode="$1"
+  mode=$((8#$mode))
+  [[ $((mode & 077)) -ne 0 ]]
+}
+
+adc_meta_get() {
+  # adc_meta_get <file> <key> — safe field only; never dump file
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || { echo ""; return 0; }
+  python3 -c '
+import json, sys
+path, key = sys.argv[1], sys.argv[2]
+allowed = {"quota_project_id", "type", "account", "universe_domain", "client_id"}
+if key not in allowed:
+    print("")
+    raise SystemExit(0)
+try:
+    with open(path) as f:
+        data = json.load(f)
+except Exception:
+    print("")
+    raise SystemExit(0)
+val = data.get(key, "")
+if val is None:
+    val = ""
+# never print secret-looking values
+if key in ("refresh_token", "client_secret", "private_key"):
+    print("")
+else:
+    print(val)
+' "$file" "$key"
 }
 
 json_get() {
@@ -231,6 +342,7 @@ sync_well_known_adc() {
   local creds
   creds="$(context_creds "$name")"
   [[ -f "$creds" ]] || die "no credentials for '$name' (run: gcpctx login $name)"
+  secure_file_600 "$creds"
   mkdir -p "$(dirname "$GCLOUD_ADC")"
   cp "$creds" "$GCLOUD_ADC"
   chmod 600 "$GCLOUD_ADC"
@@ -272,6 +384,8 @@ with open(path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 ' "$creds" "$quota"
+  secure_dir_700 "$(context_dir "$name")"
+  secure_file_600 "$creds"
   sync_well_known_adc "$name"
 
   # Keep named gcloud configuration aligned with selected project
@@ -279,6 +393,7 @@ with open(path, "w") as f:
   activate_gcloud_config "$gcloud_config"
   echo "$name" > "$ACTIVE_FILE"
 
+  # Export paths and non-secret ids only — never credential file contents
   cat <<EOF
 export GCPCTX_NAME=$(printf '%q' "$name")
 export GCPCTX_HOME=$(printf '%q' "$GCPCTX_HOME")
@@ -379,7 +494,9 @@ cmd_init() {
   local dir meta
   dir="$(context_dir "$name")"
   meta="$(context_meta "$name")"
-  mkdir -p "$dir"
+  ensure_dirs
+  mkdir -p -m 700 "$dir"
+  chmod 700 "$dir" 2>/dev/null || true
   json_write_meta "$meta" \
     name "$name" \
     account "$account" \
@@ -436,8 +553,11 @@ cmd_login() {
   gcloud auth application-default login --quota-project="$quota"
 
   [[ -f "$GCLOUD_ADC" ]] || die "ADC file not created at $GCLOUD_ADC"
+  mkdir -p -m 700 "$(context_dir "$name")"
+  chmod 700 "$(context_dir "$name")" 2>/dev/null || true
   cp "$GCLOUD_ADC" "$creds"
   chmod 600 "$creds"
+  secure_file_600 "$GCLOUD_ADC"
 
   # Force quota project + account annotation in stored credentials
   python3 -c '
@@ -685,13 +805,17 @@ cmd_scan() {
   projects_file="$(context_projects "$name")"
 
   info "scanning projects for context '$name' (account=$account)…"
+  ensure_dirs
+  local err_file
+  err_file="$GCPCTX_HOME/tmp/scan-$$.err"
   # Prefer named configuration so the correct account is used
-  if ! gcloud --configuration="$gcloud_config" projects list --format=json >"${projects_file}.tmp" 2>/tmp/gcpctx-scan.err; then
+  if ! gcloud --configuration="$gcloud_config" projects list --format=json >"${projects_file}.tmp" 2>"$err_file"; then
     rm -f "${projects_file}.tmp"
-    cat /tmp/gcpctx-scan.err >&2 || true
+    cat "$err_file" >&2 || true
+    rm -f "$err_file"
     die "projects list failed (is account logged in? gcloud auth login $account)"
   fi
-
+  rm -f "$err_file"
   python3 -c '
 import json, sys, datetime
 raw_path, out_path, account, ctx = sys.argv[1:5]
@@ -829,6 +953,16 @@ cmd_project() {
 }
 
 cmd_doctor() {
+  local fix=false
+  case "${1:-}" in
+    --fix) fix=true; shift ;;
+    "") ;;
+    *) die "usage: gcpctx doctor [--fix]" ;;
+  esac
+  if $fix; then
+    cmd_secrets_fix
+  fi
+
   local issues=0
   local name project account quota gcloud_config creds
   name="$(read_active_name)"
@@ -849,13 +983,54 @@ cmd_doctor() {
   g_config="$(cat "${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/active_config" 2>/dev/null || true)"
   echo "gcloud account=$g_account project=$g_project configuration=$g_config"
 
-  local adc_quota=""
+  # --- permission / secret hygiene ---
+  if [[ -d "$GCPCTX_HOME" ]]; then
+    local home_mode
+    home_mode="$(file_mode_octal "$GCPCTX_HOME")"
+    echo "store mode=$home_mode ($GCPCTX_HOME)"
+    if mode_too_open "$home_mode"; then
+      echo "ERROR: $GCPCTX_HOME is group/world accessible (mode $home_mode); run: gcpctx secrets fix"
+      issues=$((issues + 1))
+    fi
+  else
+    echo "WARN: $GCPCTX_HOME missing"
+  fi
+
+  local adc_quota="" adc_type=""
   if [[ -f "$GCLOUD_ADC" ]]; then
-    adc_quota="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("quota_project_id",""))' "$GCLOUD_ADC")"
-    echo "well-known ADC quota_project_id=$adc_quota"
+    adc_quota="$(adc_meta_get "$GCLOUD_ADC" quota_project_id)"
+    adc_type="$(adc_meta_get "$GCLOUD_ADC" type)"
+    echo "well-known ADC type=$adc_type quota_project_id=$adc_quota"
+    local adc_mode
+    adc_mode="$(file_mode_octal "$GCLOUD_ADC")"
+    if mode_too_open "$adc_mode"; then
+      echo "ERROR: well-known ADC is group/world readable (mode $adc_mode); run: gcpctx secrets fix"
+      issues=$((issues + 1))
+    fi
   else
     echo "well-known ADC: missing"
     issues=$((issues + 1))
+  fi
+
+  # Scan all managed credentials for open perms (never print contents)
+  if [[ -d "$CONTEXTS_DIR" ]]; then
+    local d cred mode
+    shopt -s nullglob
+    for d in "$CONTEXTS_DIR"/*/; do
+      cred="${d}credentials.json"
+      if [[ -f "$cred" ]]; then
+        mode="$(file_mode_octal "$cred")"
+        if mode_too_open "$mode"; then
+          echo "ERROR: credentials world/group-accessible: $cred (mode $mode)"
+          issues=$((issues + 1))
+        fi
+      fi
+      mode="$(file_mode_octal "$d")"
+      if mode_too_open "$mode"; then
+        echo "ERROR: context dir group/world-accessible: $d (mode $mode)"
+        issues=$((issues + 1))
+      fi
+    done
   fi
 
   if [[ -z "$name" ]]; then
@@ -895,18 +1070,101 @@ cmd_doctor() {
       echo "ERROR: ADC quota_project_id ($adc_quota) != context quota ($quota)"
       issues=$((issues + 1))
     fi
-    if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" && "$GOOGLE_APPLICATION_CREDENTIALS" != "$creds" ]]; then
-      echo "ERROR: GOOGLE_APPLICATION_CREDENTIALS points elsewhere"
-      issues=$((issues + 1))
+    if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
+      case "${GOOGLE_APPLICATION_CREDENTIALS}" in
+        "$GCPCTX_HOME"/contexts/*) ;;
+        *)
+          echo "ERROR: GOOGLE_APPLICATION_CREDENTIALS not under $GCPCTX_HOME/contexts/"
+          issues=$((issues + 1))
+          ;;
+      esac
+      if [[ "$GOOGLE_APPLICATION_CREDENTIALS" != "$creds" ]]; then
+        echo "ERROR: GOOGLE_APPLICATION_CREDENTIALS points elsewhere"
+        issues=$((issues + 1))
+      fi
     fi
   fi
 
   if [[ "$issues" -eq 0 ]]; then
     echo "OK: no mismatches detected"
   else
-    echo "FAIL: $issues issue(s) — run: eval \"\$(gcpctx use <name> --export)\""
+    echo "FAIL: $issues issue(s) — run: eval \"\$(gcpctx use <name> --export)\" or gcpctx secrets fix"
     exit 1
   fi
+}
+
+cmd_secrets() {
+  local sub="${1:-}"
+  case "$sub" in
+    fix) cmd_secrets_fix ;;
+    *) die "usage: gcpctx secrets fix" ;;
+  esac
+}
+
+cmd_secrets_fix() {
+  ensure_dirs
+  info "hardening permissions under $GCPCTX_HOME"
+  chmod 700 "$GCPCTX_HOME" 2>/dev/null || true
+  chmod 700 "$CONTEXTS_DIR" 2>/dev/null || true
+  mkdir -p -m 700 "$GCPCTX_HOME/tmp"
+  chmod 700 "$GCPCTX_HOME/tmp" 2>/dev/null || true
+  local d cred
+  shopt -s nullglob
+  for d in "$CONTEXTS_DIR"/*/; do
+    chmod 700 "$d" 2>/dev/null || true
+    cred="${d}credentials.json"
+    if [[ -f "$cred" ]]; then
+      chmod 600 "$cred" 2>/dev/null || true
+    fi
+  done
+  if [[ -f "$GCLOUD_ADC" ]]; then
+    chmod 600 "$GCLOUD_ADC" 2>/dev/null || true
+  fi
+  info "done (credentials remain local; contents never printed)"
+}
+
+cmd_shell_path() {
+  local root zsh
+  root="$(package_root)"
+  zsh="$root/shell/gcpctx.zsh"
+  [[ -f "$zsh" ]] || die "shell hook not found at $zsh"
+  echo "$zsh"
+}
+
+cmd_shell_setup() {
+  local zshrc="${ZSHRC:-$HOME/.zshrc}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --zshrc) zshrc="$2"; shift 2 ;;
+      *) die "usage: gcpctx shell-setup [--zshrc PATH]" ;;
+    esac
+  done
+  local hook
+  hook="$(cmd_shell_path)"
+  local marker_start="# >>> gcpctx >>>"
+  local marker_end="# <<< gcpctx <<<"
+  touch "$zshrc"
+  if grep -qF "$marker_start" "$zshrc" 2>/dev/null; then
+    info "zshrc already contains gcpctx block ($zshrc)"
+  else
+    {
+      echo ""
+      echo "$marker_start"
+      echo "source \"$hook\""
+      echo "$marker_end"
+    } >> "$zshrc"
+    info "appended gcpctx block to $zshrc"
+  fi
+  info "hook: $hook"
+  info "next: exec zsh   # or: source $zshrc"
+  info "then: gcpctx bootstrap && gcpctx doctor"
+}
+
+cmd_version() {
+  local ver
+  ver="$(read_package_version)"
+  [[ -n "$ver" ]] || ver="$VERSION"
+  echo "gcpctx $ver"
 }
 
 cmd_bootstrap() {
@@ -918,7 +1176,12 @@ import json, os, shutil, subprocess, pathlib
 
 home = pathlib.Path(os.environ.get("GCPCTX_HOME", pathlib.Path.home() / ".gcpctx"))
 contexts = home / "contexts"
-contexts.mkdir(parents=True, exist_ok=True)
+home.mkdir(mode=0o700, parents=True, exist_ok=True)
+contexts.mkdir(mode=0o700, parents=True, exist_ok=True)
+os.chmod(home, 0o700)
+os.chmod(contexts, 0o700)
+(tmp := home / "tmp").mkdir(mode=0o700, parents=True, exist_ok=True)
+os.chmod(tmp, 0o700)
 
 raw = subprocess.check_output(
     ["gcloud", "config", "configurations", "list", "--format=json"],
@@ -948,7 +1211,8 @@ for cfg in configs:
         print(f"gcpctx: skip '{name}' (missing project)", flush=True)
         continue
     d = contexts / name
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
     meta = {
         "name": name,
         "account": account,
@@ -979,11 +1243,14 @@ for cfg in configs:
             with open(creds, "w") as f:
                 json.dump(data, f, indent=2)
                 f.write("\n")
+            os.chmod(creds, 0o600)
             print(f"gcpctx: copied current ADC → context '{name}'", flush=True)
             matched = name
 
 if matched is None and adc:
     print("gcpctx: current ADC not matched to a context; run gcpctx login <name>", flush=True)
+if adc_path.is_file():
+    os.chmod(adc_path, 0o600)
 PY
 
   info "done. For contexts still missing credentials: gcpctx login <name>"
@@ -1040,10 +1307,13 @@ main() {
     env) cmd_env ${args[@]+"${args[@]}"} ;;
     exec) cmd_exec ${args[@]+"${args[@]}"} ;;
     doctor) cmd_doctor ${args[@]+"${args[@]}"} ;;
+    secrets) cmd_secrets ${args[@]+"${args[@]}"} ;;
     bootstrap) cmd_bootstrap ${args[@]+"${args[@]}"} ;;
     sync-adc) cmd_sync_adc ${args[@]+"${args[@]}"} ;;
+    shell-setup) cmd_shell_setup ${args[@]+"${args[@]}"} ;;
+    shell-path) cmd_shell_path ${args[@]+"${args[@]}"} ;;
     which) cmd_which ${args[@]+"${args[@]}"} ;;
-    version|--version|-V) echo "gcpctx $VERSION" ;;
+    version|--version|-V) cmd_version ;;
     help|--help|-h) usage ;;
     *) die "unknown command '$cmd' (try: gcpctx help)" ;;
   esac

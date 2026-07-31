@@ -195,25 +195,34 @@ marker_project() {
 
 ensure_gcloud_config() {
   local name="$1" account="$2" project="$3" region="$4" zone="$5"
-  if ! gcloud config configurations describe "$name" &>/dev/null; then
+  # Clear ambient project/ADC env so gcloud writes the configuration file cleanly
+  if ! env -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT -u GCLOUD_PROJECT \
+      -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_QUOTA_PROJECT \
+      gcloud config configurations describe "$name" &>/dev/null; then
     gcloud config configurations create "$name" --quiet >/dev/null
   fi
-  # Clear ambient project env so gcloud writes the configuration file, not a no-op override
   env -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT -u GCLOUD_PROJECT \
+    -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_QUOTA_PROJECT \
     gcloud --configuration="$name" config set account "$account" --quiet >/dev/null
   env -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT -u GCLOUD_PROJECT \
+    -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_QUOTA_PROJECT \
     gcloud --configuration="$name" config set project "$project" --quiet >/dev/null
   if [[ -n "$region" ]]; then
-    gcloud --configuration="$name" config set compute/region "$region" --quiet >/dev/null || true
+    env -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT -u GCLOUD_PROJECT \
+      -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_QUOTA_PROJECT \
+      gcloud --configuration="$name" config set compute/region "$region" --quiet >/dev/null || true
   fi
   if [[ -n "$zone" ]]; then
-    gcloud --configuration="$name" config set compute/zone "$zone" --quiet >/dev/null || true
+    env -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT -u GCLOUD_PROJECT \
+      -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_QUOTA_PROJECT \
+      gcloud --configuration="$name" config set compute/zone "$zone" --quiet >/dev/null || true
   fi
 }
 
 activate_gcloud_config() {
   local name="$1"
   env -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT -u GCLOUD_PROJECT \
+    -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_QUOTA_PROJECT \
     gcloud config configurations activate "$name" --quiet >/dev/null
 }
 

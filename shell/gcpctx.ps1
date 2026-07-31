@@ -133,6 +133,23 @@ function gcpctx_prompt {
     return ''
 }
 
+function Import-GcpctxEnvJson {
+    param([Parameter(Mandatory = $true)][string]$JsonText)
+    $obj = $JsonText | ConvertFrom-Json
+    if (-not $obj.env) { return }
+    $obj.env.PSObject.Properties | ForEach-Object {
+        Set-Item -Path "Env:$($_.Name)" -Value ([string]$_.Value)
+    }
+}
+
+function Clear-GcpctxEnv {
+    @(
+        'GCPCTX_NAME', 'GCPCTX_HOME', 'GOOGLE_APPLICATION_CREDENTIALS',
+        'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT', 'GOOGLE_CLOUD_QUOTA_PROJECT',
+        'CLOUDSDK_CORE_PROJECT', 'CLOUDSDK_ACTIVE_CONFIG_NAME'
+    ) | ForEach-Object { Remove-Item -Path "Env:$_" -ErrorAction SilentlyContinue }
+}
+
 function gcpctx {
     param(
         [Parameter(ValueFromRemainingArguments = $true)]
@@ -149,6 +166,11 @@ function gcpctx {
 
     $needsExport = $false
     if ($cmd -in @('use', 'activate', 'deactivate', 'env')) {
+        if ($cmd -eq 'env' -and ($rest -contains '--json')) {
+            $r = Invoke-GcpctxBash -CliArgs $Args
+            Write-Host $r.Output
+            return
+        }
         $needsExport = $true
     } elseif ($cmd -eq 'project') {
         if ($rest.Count -eq 0 -or $rest[0] -notin @('list', 'ls', 'scan')) {
@@ -157,13 +179,24 @@ function gcpctx {
     }
 
     if ($needsExport) {
-        $cli = @($cmd) + $rest + @('--export')
-        $r = Invoke-GcpctxBash -CliArgs $cli
+        if ($cmd -eq 'deactivate') {
+            $null = Invoke-GcpctxBash -CliArgs @('deactivate')
+            Clear-GcpctxEnv
+            return
+        }
+        # Side-effect activate in bash (writes active + ADC); then structured env JSON
+        $cli = @($cmd) + $rest
+        $act = Invoke-GcpctxBash -CliArgs $cli
+        if ($act.ExitCode -ne 0) {
+            Write-Error $act.Output
+            return
+        }
+        $r = Invoke-GcpctxBash -CliArgs @('env', '--json')
         if ($r.ExitCode -ne 0) {
             Write-Error $r.Output
             return
         }
-        Import-GcpctxExport -ExportText $r.Output
+        Import-GcpctxEnvJson -JsonText $r.Output
         return
     }
 

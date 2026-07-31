@@ -1,0 +1,8 @@
+name: Security
+description: Do not file public security issues here
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report vulnerabilities in public issues.**
+        Follow SECURITY.md and use private vulnerability reporting.

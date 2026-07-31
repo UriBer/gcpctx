@@ -1,37 +1,58 @@
 {
   "name": "gcpctx",
-  "version": "0.2.1",
-  "description": "Switch GCP account, project, and Application Default Credentials as one unit",
+  "version": "0.3.0",
+  "description": "Safe Google Cloud context manager: account, project, ADC, and quota as one unit",
   "bin": {
     "gcpctx": "./bin/gcpctx"
   },
   "files": [
     "bin/",
+    "lib/",
     "shell/",
+    "completions/",
+    "VERSION",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "SECURITY.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
+    "test": "bash scripts/run-tests.sh",
+    "test:unit": "bash scripts/run-tests.sh unit",
+    "test:integration": "bash scripts/run-tests.sh integration",
+    "test:security": "bash scripts/run-tests.sh security",
+    "lint": "bash scripts/lint.sh",
+    "format:check": "bash scripts/format-check.sh",
+    "security:scan": "bash scripts/check-no-secrets.sh",
     "pack:check": "bash scripts/check-no-secrets.sh",
-    "prepublishOnly": "npm run pack:check"
+    "verify": "bash scripts/verify.sh",
+    "prepublishOnly": "npm run verify"
   },
   "engines": {
     "node": ">=18"
   },
   "os": [
     "darwin",
-    "linux"
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
   ],
   "keywords": [
     "gcloud",
     "gcp",
+    "google-cloud",
     "adc",
     "credentials",
     "context",
-    "cli"
+    "cli",
+    "terraform",
+    "security"
   ],
   "author": "UriBer",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/UriBer/gcpctx.git"

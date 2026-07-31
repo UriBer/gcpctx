@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>gcpctx — Stop deploying to the wrong GCP project</title>
+  <style>
+    :root { --bg:#0b1220; --fg:#e8eef7; --muted:#9db0c9; --acc:#3dd6c6; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+    main { max-width: 880px; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
+    h1 { font-size: clamp(2rem, 5vw, 3rem); line-height:1.1; }
+    .lead { color: var(--muted); font-size:1.15rem; }
+    pre { background:#121a2b; padding:1rem; overflow:auto; border-radius:8px; }
+    a { color: var(--acc); }
+    .cta { display:inline-block; margin-top:1rem; padding:.7rem 1rem; background:var(--acc); color:#042; text-decoration:none; border-radius:6px; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Stop deploying to the wrong GCP project</h1>
+  <p class="lead">gcpctx switches account, project, gcloud config, ADC and quota project as one safe context.</p>
+  <pre><code>npm install -g gcpctx
+gcpctx shell-setup
+gcpctx use prod
+gcpctx assert --project my-prod</code></pre>
+  <a class="cta" href="https://github.com/UriBer/gcpctx">View on GitHub</a>
+  <h2>Why gcloud config is not enough</h2>
+  <p>Client libraries use Application Default Credentials — a separate global file. gcpctx keeps CLI + ADC aligned.</p>
+  <h2>Security</h2>
+  <p>No telemetry. Credential bodies never printed. See SECURITY.md.</p>
+</main>
+</body>
+</html>

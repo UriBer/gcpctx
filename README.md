@@ -45,13 +45,18 @@ gcpctx login prod
 gcpctx login dev
 
 # Switch (zsh wrapper auto-evals env)
-gcpctx use dev
+gcpctx use prod
+gcpctx scan                 # discover projects for that account
+gcpctx projects             # list cached projects
+gcpctx use prod --project other-project
+# or keep context and only change project:
+gcpctx project other-project
 gcpctx current
 gcpctx doctor
 
 # Folder-based: in an app repo
-echo '{"name":"dev"}' > .gcpctx
-# cd away and back → auto-activate
+echo '{"name":"prod","project":"dgt-gcp-moe-dlk-data-prod"}' > .gcpctx
+# cd away and back → auto-activate context + project
 
 # Run one command in context (scripts/CI)
 gcpctx use prod
@@ -80,13 +85,15 @@ gcpctx current --json
 ```json
 {
   "active": true,
-  "name": "dev",
+  "name": "prod",
   "account": "you@example.com",
   "project": "my-project",
   "quota_project": "my-project",
-  "gcloud_config": "dev",
-  "credentials_path": "/Users/you/.gcpctx/contexts/dev/credentials.json",
-  "credentials_present": true
+  "gcloud_config": "prod",
+  "credentials_path": "/Users/you/.gcpctx/contexts/prod/credentials.json",
+  "credentials_present": true,
+  "projects_scanned": 12,
+  "projects_scanned_at": "2026-07-31T06:00:00Z"
 }
 ```
 
@@ -97,19 +104,26 @@ gcpctx current --json
   active
   contexts/
     <name>/
-      meta.json           # account, project, quota, region, gcloud_config
-      credentials.json    # ADC for this context only (never commit)
+      meta.json           # account, active project, quota, region, gcloud_config
+      credentials.json    # ADC for this context/account (never commit)
+      projects.json       # cached scan of projects this account can access
 
-<repo>/.gcpctx            # {"name":"dev"}  — safe to commit
+<repo>/.gcpctx            # {"name":"prod","project":"my-gcp-project"}  — safe to commit
 ```
+
+A **context** is an account/env (credentials). A **project** is selected inside that context after `gcpctx scan`.
 
 ## Commands
 
 ```
 gcpctx init [--name --project --account --region --zone]
 gcpctx login [NAME]
-gcpctx use <name>
-gcpctx activate          # from nearest .gcpctx
+gcpctx use <name> [--project PROJECT]
+gcpctx project <project-id>      # switch project in active context
+gcpctx project set <project-id>
+gcpctx scan [NAME] [--json]      # discover projects for context account
+gcpctx projects [NAME] [--json] [--refresh]
+gcpctx activate          # from nearest .gcpctx (honors project field)
 gcpctx deactivate
 gcpctx list
 gcpctx current [--json|--prompt]
@@ -130,9 +144,10 @@ eval "$(gcpctx use dev --export)"
 
 ## Safety
 
-- One ADC file per context (no shared global login across accounts)
-- Quota project always aligned to the context project on login/activate
+- One ADC file per context/account (no shared global login across accounts)
+- Quota project always aligned to the **selected** project on login/activate/project switch
 - `gcpctx doctor` fails if gcloud project, env project, and ADC `quota_project_id` disagree
+- `gcpctx scan` caches projects per context so `use`/`project` can resolve IDs (and warn if unknown)
 
 ## License
 

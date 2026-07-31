@@ -1,3 +1,4 @@
 {
-  "name": "dev"
+  "name": "prod",
+  "project": "dgt-gcp-moe-dlk-data-prod"
 }

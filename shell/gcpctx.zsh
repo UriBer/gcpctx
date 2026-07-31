@@ -3,11 +3,12 @@
 # Prefer:
 #   gcpctx shell-setup
 # Or manually:
-#   source "$(gcpctx shell-path)"
+#   source "$(gcpctx shell-path --zsh)"
 #
 # Provides:
 #   - gcpctx shell function that auto-evals use/activate/deactivate/project
 #   - chpwd hook to auto-activate nearest .gcpctx (like .venv)
+#   - venv-style prompt prefix: (gcp:ctx:project)
 
 # Resolve the real binary (avoid recursion through this function)
 if [[ -z "${GCPCTX_BIN:-}" ]]; then
@@ -18,7 +19,6 @@ if [[ -z "${GCPCTX_BIN:-}" ]]; then
   elif [[ -x "$HOME/.local/bin/gcpctx" ]]; then
     GCPCTX_BIN="$HOME/.local/bin/gcpctx"
   else
-    # Fall back to sibling bin relative to this file (npm package layout)
     GCPCTX_BIN="${${(%):-%x}:A:h}/../bin/gcpctx"
   fi
 fi
@@ -44,7 +44,7 @@ gcpctx() {
   esac
 }
 
-# Auto-activate when entering a directory tree with .gcpctx
+# --- directory auto-activate ---
 typeset -g _GCPCTX_LAST_MARKER=""
 typeset -g _GCPCTX_LAST_MARKER_HASH=""
 
@@ -84,11 +84,51 @@ _gcpctx_auto() {
   fi
 }
 
+# --- venv-style prompt ---
+# (gcp:ctx:project) built from env — no subprocess per prompt
+# Disable: export GCPCTX_DISABLE_PROMPT=1
+typeset -g _GCPCTX_BASE_PROMPT=""
+typeset -g _GCPCTX_PROMPT_READY=0
+
+_gcpctx_prompt_segment() {
+  [[ -n "${GCPCTX_DISABLE_PROMPT:-}" ]] && return 0
+  [[ -z "${GCPCTX_NAME:-}" ]] && return 0
+  local seg="(gcp:${GCPCTX_NAME}"
+  if [[ -n "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
+    seg+=":${GOOGLE_CLOUD_PROJECT}"
+  fi
+  seg+=") "
+  print -rn -- "$seg"
+}
+
+gcpctx_prompt() {
+  # Prefer env (fast); fall back to CLI for scripts when inactive shell state
+  local seg
+  seg="$(_gcpctx_prompt_segment)"
+  if [[ -n "$seg" ]]; then
+    print -rn -- "$seg"
+  else
+    "$GCPCTX_BIN" current --prompt 2>/dev/null
+  fi
+}
+
+_gcpctx_prompt_precmd() {
+  if [[ -z "${GCPCTX_DISABLE_PROMPT:-}" ]]; then
+    if [[ "$_GCPCTX_PROMPT_READY" -eq 0 ]]; then
+      _GCPCTX_BASE_PROMPT="$PROMPT"
+      _GCPCTX_PROMPT_READY=1
+    fi
+    local seg
+    seg="$(_gcpctx_prompt_segment)"
+    if [[ -n "$seg" ]]; then
+      PROMPT="${seg}${_GCPCTX_BASE_PROMPT}"
+    else
+      PROMPT="${_GCPCTX_BASE_PROMPT}"
+    fi
+  fi
+}
+
 autoload -U add-zsh-hook
 add-zsh-hook chpwd _gcpctx_auto
+add-zsh-hook precmd _gcpctx_prompt_precmd
 _gcpctx_auto
-
-# Optional prompt segment: $(gcpctx_prompt) → gcp:prod:my-project
-gcpctx_prompt() {
-  "$GCPCTX_BIN" current --prompt 2>/dev/null
-}

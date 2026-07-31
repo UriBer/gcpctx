@@ -26,6 +26,7 @@ Automations in CI handle most packaging; a few steps need human credentials or o
      - `ENABLE_CODEQL=true`
      - `ENABLE_DEPENDENCY_REVIEW=true`
      - `ENABLE_SCORECARD=true`
+     - `ENABLE_ATTESTATIONS=true` (artifact provenance; public/Pro)
 
 ### Distribution repos created
 

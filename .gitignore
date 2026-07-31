@@ -1,4 +1,4 @@
-# gcpctx — private tooling
+# gcpctx
 .DS_Store
 *.swp
 .env
@@ -11,3 +11,5 @@ credentials.json
 *.key
 *.tgz
 node_modules/
+dist/
+.gcpctx

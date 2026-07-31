@@ -1,13 +1,39 @@
 #!/usr/bin/env bash
 # gcpctx — manage gcloud ADC + project contexts (folder / CLI / env API)
+# Copyright 2026 UriBer. Licensed under Apache-2.0.
 set -eo pipefail
+
+# Resolve package/lib root (symlink-aware)
+_GCPCTX_ROOT=""
+_gcpctx_resolve_root() {
+  local src="${BASH_SOURCE[0]:-$0}"
+  if command -v realpath >/dev/null 2>&1; then
+    src="$(realpath "$src" 2>/dev/null || echo "$src")"
+  fi
+  _GCPCTX_ROOT="$(cd "$(dirname "$src")/.." && pwd)"
+}
+_gcpctx_resolve_root
+
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/validation.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/exports.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/filesystem.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/version.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/gcloud.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/doctor.sh"
+
+gcpctx_umask_secure
 
 GCPCTX_HOME="${GCPCTX_HOME:-$HOME/.gcpctx}"
 CONTEXTS_DIR="$GCPCTX_HOME/contexts"
 ACTIVE_FILE="$GCPCTX_HOME/active"
 GCLOUD_ADC="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/application_default_credentials.json"
 MARKER_NAME=".gcpctx"
-VERSION="0.2.1"
 
 usage() {
   cat <<'EOF'
@@ -28,10 +54,14 @@ Usage:
   gcpctx current [--json] [--prompt]
   gcpctx env [--export]
   gcpctx exec [--] <command>...
-  gcpctx doctor [--fix]
-  gcpctx secrets fix        # chmod 700/600 on managed credential store
-  gcpctx bootstrap          # import from existing gcloud configurations
-  gcpctx sync-adc [NAME]    # copy context credentials to well-known ADC path
+  gcpctx protect <name>
+  gcpctx unprotect <name>
+  gcpctx assert [--context NAME] [--project ID] [--account EMAIL]
+  gcpctx completion bash|zsh|powershell
+  gcpctx doctor [--fix] [--json]
+  gcpctx secrets fix
+  gcpctx bootstrap
+  gcpctx sync-adc [NAME]
   gcpctx shell-setup [--zshrc PATH] [--bashrc PATH] [--pwsh-profile PATH]
   gcpctx shell-path [--zsh|--bash|--ps1]
   gcpctx which
@@ -68,31 +98,10 @@ App / API env vars set on activate:
 EOF
 }
 
-die() { echo "gcpctx: $*" >&2; exit 1; }
-info() { echo "gcpctx: $*" >&2; }
-
 # Resolve install root (symlink-aware) for package.json / shell hooks
 package_root() {
-  local src="${BASH_SOURCE[0]:-$0}"
-  local dir
-  if command -v realpath >/dev/null 2>&1; then
-    src="$(realpath "$src" 2>/dev/null || echo "$src")"
-  elif command -v readlink >/dev/null 2>&1; then
-    local cur="$src"
-    while [[ -L "$cur" ]]; do
-      local link
-      link="$(readlink "$cur")"
-      if [[ "$link" == /* ]]; then
-        cur="$link"
-      else
-        cur="$(dirname "$cur")/$link"
-      fi
-    done
-    src="$cur"
-  fi
-  dir="$(cd "$(dirname "$src")/.." && pwd)"
-  if [[ -f "$dir/shell/gcpctx.zsh" || -f "$dir/package.json" ]]; then
-    echo "$dir"
+  if [[ -f "$_GCPCTX_ROOT/package.json" || -f "$_GCPCTX_ROOT/shell/gcpctx.zsh" ]]; then
+    echo "$_GCPCTX_ROOT"
     return 0
   fi
   if [[ -n "${GCPCTX_PACKAGE_ROOT:-}" && -f "${GCPCTX_PACKAGE_ROOT}/shell/gcpctx.zsh" ]]; then
@@ -107,37 +116,25 @@ package_root() {
       return 0
     fi
   fi
-  # Last resort: empty — callers must handle
-  echo "$dir"
+  echo "$_GCPCTX_ROOT"
 }
 
 read_package_version() {
-  local root pkg
-  root="$(package_root)"
-  pkg="$root/package.json"
-  if [[ -f "$pkg" ]]; then
-    python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "$pkg" 2>/dev/null || true
-  fi
+  gcpctx_read_version "$(package_root)"
 }
+
+die() { gcpctx_die "$*"; }
+info() { echo "gcpctx: $*" >&2; }
 
 ensure_dirs() {
-  mkdir -p -m 700 "$GCPCTX_HOME"
-  mkdir -p -m 700 "$CONTEXTS_DIR"
-  mkdir -p -m 700 "$GCPCTX_HOME/tmp"
-  chmod 700 "$GCPCTX_HOME" "$CONTEXTS_DIR" "$GCPCTX_HOME/tmp" 2>/dev/null || true
+  gcpctx_ensure_dir_700 "$GCPCTX_HOME"
+  gcpctx_ensure_dir_700 "$CONTEXTS_DIR"
+  gcpctx_ensure_dir_700 "$GCPCTX_HOME/tmp"
 }
 
-secure_file_600() {
-  local f="$1"
-  [[ -f "$f" ]] || return 0
-  chmod 600 "$f" 2>/dev/null || true
-}
+secure_file_600() { gcpctx_chmod_600 "$1"; }
+secure_dir_700() { gcpctx_ensure_dir_700 "$1"; }
 
-secure_dir_700() {
-  local d="$1"
-  [[ -d "$d" ]] || return 0
-  chmod 700 "$d" 2>/dev/null || true
-}
 
 file_mode_octal() {
   local f="$1"
@@ -241,6 +238,7 @@ context_exists() {
 }
 
 require_context() {
+  gcpctx_validate_context_name "$1"
   context_exists "$1" || die "unknown context '$1' (try: gcpctx list)"
 }
 
@@ -393,17 +391,15 @@ with open(path, "w") as f:
   activate_gcloud_config "$gcloud_config"
   echo "$name" > "$ACTIVE_FILE"
 
-  # Export paths and non-secret ids only — never credential file contents
-  cat <<EOF
-export GCPCTX_NAME=$(printf '%q' "$name")
-export GCPCTX_HOME=$(printf '%q' "$GCPCTX_HOME")
-export GOOGLE_APPLICATION_CREDENTIALS=$(printf '%q' "$creds")
-export GOOGLE_CLOUD_PROJECT=$(printf '%q' "$project")
-export GCLOUD_PROJECT=$(printf '%q' "$project")
-export GOOGLE_CLOUD_QUOTA_PROJECT=$(printf '%q' "$quota")
-export CLOUDSDK_CORE_PROJECT=$(printf '%q' "$project")
-export CLOUDSDK_ACTIVE_CONFIG_NAME=$(printf '%q' "$gcloud_config")
-EOF
+  # Export paths and non-secret ids only — stdout must be ONLY export lines
+  gcpctx_emit_export GCPCTX_NAME "$name"
+  gcpctx_emit_export GCPCTX_HOME "$GCPCTX_HOME"
+  gcpctx_emit_export GOOGLE_APPLICATION_CREDENTIALS "$creds"
+  gcpctx_emit_export GOOGLE_CLOUD_PROJECT "$project"
+  gcpctx_emit_export GCLOUD_PROJECT "$project"
+  gcpctx_emit_export GOOGLE_CLOUD_QUOTA_PROJECT "$quota"
+  gcpctx_emit_export CLOUDSDK_CORE_PROJECT "$project"
+  gcpctx_emit_export CLOUDSDK_ACTIVE_CONFIG_NAME "$gcloud_config"
 }
 
 resolve_project_id() {
@@ -455,15 +451,7 @@ if project not in ids:
 
 print_deactivate_exports() {
   rm -f "$ACTIVE_FILE"
-  cat <<'EOF'
-unset GCPCTX_NAME
-unset GOOGLE_APPLICATION_CREDENTIALS
-unset GOOGLE_CLOUD_PROJECT
-unset GCLOUD_PROJECT
-unset GOOGLE_CLOUD_QUOTA_PROJECT
-unset CLOUDSDK_CORE_PROJECT
-unset CLOUDSDK_ACTIVE_CONFIG_NAME
-EOF
+  gcpctx_emit_deactivate_exports
 }
 
 want_export=false
@@ -490,12 +478,18 @@ cmd_init() {
   [[ -n "$project" ]] || die "need --project"
   [[ -n "$account" ]] || die "need --account"
   [[ -n "$gcloud_config" ]] || gcloud_config="$name"
+  gcpctx_validate_context_name "$name"
+  gcpctx_validate_project_id "$project"
+  gcpctx_validate_account "$account"
+  gcpctx_validate_region "$region"
+  gcpctx_validate_zone "$zone"
+  gcpctx_validate_context_name "$gcloud_config"
 
   local dir meta
   dir="$(context_dir "$name")"
   meta="$(context_meta "$name")"
   ensure_dirs
-  mkdir -p -m 700 "$dir"
+  mkdir -p "$dir"
   chmod 700 "$dir" 2>/dev/null || true
   json_write_meta "$meta" \
     name "$name" \
@@ -523,6 +517,7 @@ with open(".gcpctx", "w") as f:
 
 cmd_login() {
   ensure_dirs
+  gcpctx_require_trusted_gcloud
   local name="${1:-}"
   if [[ -z "$name" ]]; then
     name="$(read_active_name)"
@@ -564,25 +559,35 @@ cmd_login() {
   fi
 
   [[ -f "$GCLOUD_ADC" ]] || die "ADC file not created at $GCLOUD_ADC"
-  mkdir -p -m 700 "$(context_dir "$name")"
+  mkdir -p "$(context_dir "$name")"
   chmod 700 "$(context_dir "$name")" 2>/dev/null || true
   cp "$GCLOUD_ADC" "$creds"
   chmod 600 "$creds"
   secure_file_600 "$GCLOUD_ADC"
 
-  # Force quota project + account annotation in stored credentials
+  # Force quota project on authorized_user ADC only; never print body
   python3 -c '
 import json, sys
 path, quota, account = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
     data = json.load(f)
-data["quota_project_id"] = quota
-if account:
-    data["account"] = account
+ctype = data.get("type") or ""
+if ctype == "authorized_user":
+    if quota:
+        data["quota_project_id"] = quota
+    if account and "account" not in data:
+        data["account"] = account
+elif ctype in ("service_account", "external_account"):
+    # Do not inject unrelated fields into SA / WIF credentials
+    pass
+else:
+    if quota and "quota_project_id" in data:
+        data["quota_project_id"] = quota
 with open(path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 ' "$creds" "$quota" "$account"
+  chmod 600 "$creds"
 
   info "saved credentials → $creds"
   info "activate with: gcpctx use $name"
@@ -615,8 +620,14 @@ cmd_use() {
   done
   [[ -n "$name" ]] || die "usage: gcpctx use <name> [--project PROJECT]"
   require_context "$name"
+  local protected
+  protected="$(json_get "$(context_meta "$name")" protected)"
+  if [[ "$protected" == "true" ]]; then
+    info "WARNING: activating protected context '$name'"
+  fi
   if [[ -n "$project" ]]; then
     project="$(resolve_project_id "$name" "$project")"
+    gcpctx_validate_project_id "$project"
     warn_if_unknown_project "$name" "$project"
   fi
   if $want_export; then
@@ -769,19 +780,146 @@ EOF
 }
 
 cmd_env() {
+  local mode="export"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) mode="json"; shift ;;
+      --export) mode="export"; shift ;;
+      *) die "usage: gcpctx env [--export|--json]" ;;
+    esac
+  done
+  if [[ "$mode" == "json" ]]; then
+    # Prefer values that would be active after current context
+    local name
+    name="$(read_active_name)"
+    if [[ -n "$name" ]]; then
+      # Apply exports into a subshell env for JSON snapshot without printing secrets
+      # shellcheck disable=SC1090
+      eval "$(print_exports "$name")"
+    fi
+    gcpctx_emit_env_json
+    return
+  fi
   local name
   name="$(read_active_name)"
   [[ -n "$name" ]] || die "no active context (gcpctx use <name>)"
-  # Force export style for env command when --export or default printable
   want_export=true
   print_exports "$name"
 }
 
-cmd_exec() {
-  if [[ "${1:-}" == "--" ]]; then
-    shift
+cmd_assert() {
+  local want_ctx="" want_project="" want_account=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --context) want_ctx="$2"; shift 2 ;;
+      --project) want_project="$2"; shift 2 ;;
+      --account) want_account="$2"; shift 2 ;;
+      *) die "usage: gcpctx assert [--context NAME] [--project ID] [--account EMAIL]" ;;
+    esac
+  done
+  [[ -n "$want_ctx$want_project$want_account" ]] || die "assert requires at least one of --context/--project/--account"
+  local name project account meta
+  name="$(read_active_name)"
+  [[ -n "$name" ]] || die "assert failed: no active context"
+  meta="$(context_meta "$name")"
+  project="$(json_get "$meta" project)"
+  account="$(json_get "$meta" account)"
+  local failed=0
+  if [[ -n "$want_ctx" ]]; then
+    gcpctx_validate_context_name "$want_ctx"
+    if [[ "$name" != "$want_ctx" ]]; then
+      echo "gcpctx: assert failed: context='$name' expected='$want_ctx'" >&2
+      failed=1
+    fi
   fi
-  [[ $# -gt 0 ]] || die "usage: gcpctx exec -- <command>..."
+  if [[ -n "$want_project" ]]; then
+    gcpctx_validate_project_id "$want_project"
+    if [[ "$project" != "$want_project" && "${GOOGLE_CLOUD_PROJECT:-}" != "$want_project" ]]; then
+      echo "gcpctx: assert failed: project='$project' expected='$want_project'" >&2
+      failed=1
+    fi
+  fi
+  if [[ -n "$want_account" ]]; then
+    gcpctx_validate_account "$want_account"
+    if [[ "$account" != "$want_account" ]]; then
+      echo "gcpctx: assert failed: account mismatch" >&2
+      failed=1
+    fi
+  fi
+  [[ "$failed" -eq 0 ]] || exit 1
+  echo "gcpctx: assert ok"
+}
+
+cmd_protect() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: gcpctx protect <name>"
+  require_context "$name"
+  json_write_meta "$(context_meta "$name")" protected "true"
+  info "context '$name' marked protected"
+}
+
+cmd_unprotect() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: gcpctx unprotect <name>"
+  require_context "$name"
+  json_write_meta "$(context_meta "$name")" protected "false"
+  info "context '$name' unprotected"
+}
+
+cmd_completion() {
+  local shell="${1:-}"
+  case "$shell" in
+    bash)
+      cat <<'EOF'
+_gcpctx_completions() {
+  local cur="${COMP_WORDS[COMP_CWORD]}"
+  local cmds="init login use project scan projects activate deactivate list current env exec doctor secrets bootstrap sync-adc shell-setup shell-path protect unprotect assert completion which version help"
+  if [[ $COMP_CWORD -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+  fi
+}
+complete -F _gcpctx_completions gcpctx
+EOF
+      ;;
+    zsh)
+      cat <<'EOF'
+#compdef gcpctx
+_gcpctx() {
+  local -a cmds
+  cmds=(init login use project scan projects activate deactivate list current env exec doctor secrets bootstrap sync-adc shell-setup shell-path protect unprotect assert completion which version help)
+  _describe 'command' cmds
+}
+compdef _gcpctx gcpctx
+EOF
+      ;;
+    powershell|ps1)
+      cat <<'EOF'
+Register-ArgumentCompleter -CommandName gcpctx -ScriptBlock {
+  param($wordToComplete)
+  $cmds = @('init','login','use','project','scan','projects','activate','deactivate','list','current','env','exec','doctor','secrets','bootstrap','sync-adc','shell-setup','shell-path','protect','unprotect','assert','completion','which','version','help')
+  $cmds | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+  }
+}
+EOF
+      ;;
+    *) die "usage: gcpctx completion bash|zsh|powershell" ;;
+  esac
+}
+
+cmd_exec() {
+  local require_ctx="" deny_protected=false allow_protected=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --) shift; break ;;
+      --require-context) require_ctx="$2"; shift 2 ;;
+      --deny-protected) deny_protected=true; shift ;;
+      --allow-protected) allow_protected=true; shift ;;
+      -*) die "unknown exec flag: $1" ;;
+      *) break ;;
+    esac
+  done
+  [[ $# -gt 0 ]] || die "usage: gcpctx exec [--require-context NAME] [--deny-protected|--allow-protected] -- <command>..."
   local name project=""
   name="$(read_active_name)"
   if [[ -z "$name" ]]; then
@@ -789,7 +927,26 @@ cmd_exec() {
     project="$(marker_project)"
   fi
   [[ -n "$name" ]] || die "no context (use .gcpctx or gcpctx use)"
-  # Apply env in a subshell
+  if [[ -n "$require_ctx" ]]; then
+    gcpctx_validate_context_name "$require_ctx"
+    [[ "$name" == "$require_ctx" ]] || die "exec require-context failed: active='$name' required='$require_ctx'"
+  fi
+  local protected
+  protected="$(json_get "$(context_meta "$name")" protected)"
+  if [[ "$protected" == "true" ]]; then
+    if $deny_protected; then
+      die "refusing to exec in protected context '$name' (--deny-protected)"
+    fi
+    if ! $allow_protected; then
+      if [[ ! -t 0 ]]; then
+        die "protected context '$name' requires --allow-protected in non-interactive mode"
+      fi
+      info "WARNING: protected context '$name' — type 'yes' to continue"
+      local ans
+      read -r ans
+      [[ "$ans" == "yes" ]] || die "aborted"
+    fi
+  fi
   # shellcheck disable=SC1090
   eval "$(print_exports "$name" "$project")"
   exec "$@"
@@ -822,6 +979,7 @@ cmd_scan() {
 
   info "scanning projects for context '$name' (account=$account)…"
   ensure_dirs
+  gcpctx_require_trusted_gcloud
   local err_file
   err_file="$GCPCTX_HOME/tmp/scan-$$.err"
   # Prefer named configuration so the correct account is used
@@ -969,66 +1127,95 @@ cmd_project() {
 }
 
 cmd_doctor() {
-  local fix=false
-  case "${1:-}" in
-    --fix) fix=true; shift ;;
-    "") ;;
-    *) die "usage: gcpctx doctor [--fix]" ;;
-  esac
+  local fix=false json=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --fix) fix=true; shift ;;
+      --json) json=true; shift ;;
+      *) die "usage: gcpctx doctor [--fix] [--json]" ;;
+    esac
+  done
   if $fix; then
     cmd_secrets_fix
   fi
 
-  local issues=0
+  gcpctx_doctor_reset
+  ensure_dirs
   local name project account quota gcloud_config creds
   name="$(read_active_name)"
 
-  echo "gcpctx doctor"
-  echo "-------------"
-  echo "GCPCTX_HOME=$GCPCTX_HOME"
-  echo "active_file=$( [[ -f $ACTIVE_FILE ]] && cat "$ACTIVE_FILE" || echo '(none)' )"
-  echo "env GCPCTX_NAME=${GCPCTX_NAME:-"(unset)"}"
-  echo "env GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-"(unset)"}"
-  echo "env GOOGLE_CLOUD_QUOTA_PROJECT=${GOOGLE_CLOUD_QUOTA_PROJECT:-"(unset)"}"
-  echo "env GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-"(unset)"}"
-  echo "env CLOUDSDK_ACTIVE_CONFIG_NAME=${CLOUDSDK_ACTIVE_CONFIG_NAME:-"(unset)"}"
+  local gcloud_bin="" perms_ok=false
+  if gcpctx_try_resolve_gcloud; then
+    gcloud_bin="$(gcpctx_gcloud_bin)"
+    if [[ "${_GCPCTX_GCLOUD_TRUSTED:-0}" != "1" ]]; then
+      gcpctx_doctor_add GCLOUD_UNTRUSTED warn "gcloud binary may be PATH-hijackable; set GCPCTX_GCLOUD" "$gcloud_bin"
+    fi
+  else
+    gcpctx_doctor_add GCLOUD_MISSING error "gcloud not found on PATH (set GCPCTX_GCLOUD)"
+  fi
 
-  local g_account g_project g_config
-  g_account="$(gcloud config get-value account 2>/dev/null || true)"
-  g_project="$(gcloud config get-value project 2>/dev/null || true)"
-  g_config="$(cat "${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/active_config" 2>/dev/null || true)"
-  echo "gcloud account=$g_account project=$g_project configuration=$g_config"
+  if gcpctx_perms_supported "$GCPCTX_HOME"; then
+    perms_ok=true
+  else
+    gcpctx_doctor_add PERMS_UNSUPPORTED warn "Unix permission bits not enforceable on this filesystem (common on some Windows mounts)"
+  fi
 
-  # --- permission / secret hygiene ---
+  if ! $json; then
+    echo "gcpctx doctor"
+    echo "-------------"
+    echo "GCPCTX_HOME=$GCPCTX_HOME"
+    echo "active_file=$( [[ -f $ACTIVE_FILE ]] && cat "$ACTIVE_FILE" || echo '(none)' )"
+    echo "env GCPCTX_NAME=${GCPCTX_NAME:-"(unset)"}"
+    echo "env GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-"(unset)"}"
+    echo "env GOOGLE_CLOUD_QUOTA_PROJECT=${GOOGLE_CLOUD_QUOTA_PROJECT:-"(unset)"}"
+    echo "env GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-"(unset)"}"
+    echo "env CLOUDSDK_ACTIVE_CONFIG_NAME=${CLOUDSDK_ACTIVE_CONFIG_NAME:-"(unset)"}"
+    echo "gcloud_bin=${gcloud_bin:-"(missing)"}"
+    echo "perms_supported=$perms_ok"
+  fi
+
+  local g_account="" g_project="" g_config=""
+  if [[ -n "$gcloud_bin" ]]; then
+    g_account="$(gcloud config get-value account 2>/dev/null || true)"
+    g_project="$(gcloud config get-value project 2>/dev/null || true)"
+    g_config="$(cat "${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/active_config" 2>/dev/null || true)"
+    if ! $json; then
+      echo "gcloud account=$g_account project=$g_project configuration=$g_config"
+    fi
+  fi
+
   if [[ -d "$GCPCTX_HOME" ]]; then
     local home_mode
     home_mode="$(file_mode_octal "$GCPCTX_HOME")"
-    echo "store mode=$home_mode ($GCPCTX_HOME)"
-    if mode_too_open "$home_mode"; then
-      echo "ERROR: $GCPCTX_HOME is group/world accessible (mode $home_mode); run: gcpctx secrets fix"
-      issues=$((issues + 1))
+    if ! $json; then
+      echo "store mode=$home_mode ($GCPCTX_HOME)"
+    fi
+    if $perms_ok && mode_too_open "$home_mode"; then
+      gcpctx_doctor_add STORE_PERMS_OPEN error "$GCPCTX_HOME is group/world accessible (mode $home_mode); run: gcpctx secrets fix" "$GCPCTX_HOME"
     fi
   else
-    echo "WARN: $GCPCTX_HOME missing"
+    gcpctx_doctor_add STORE_MISSING warn "$GCPCTX_HOME missing" "$GCPCTX_HOME"
   fi
 
   local adc_quota="" adc_type=""
   if [[ -f "$GCLOUD_ADC" ]]; then
     adc_quota="$(adc_meta_get "$GCLOUD_ADC" quota_project_id)"
     adc_type="$(adc_meta_get "$GCLOUD_ADC" type)"
-    echo "well-known ADC type=$adc_type quota_project_id=$adc_quota"
+    if ! $json; then
+      echo "well-known ADC type=$adc_type quota_project_id=$adc_quota"
+    fi
     local adc_mode
     adc_mode="$(file_mode_octal "$GCLOUD_ADC")"
-    if mode_too_open "$adc_mode"; then
-      echo "ERROR: well-known ADC is group/world readable (mode $adc_mode); run: gcpctx secrets fix"
-      issues=$((issues + 1))
+    if $perms_ok && mode_too_open "$adc_mode"; then
+      gcpctx_doctor_add ADC_PERMS_OPEN error "well-known ADC is group/world readable (mode $adc_mode); run: gcpctx secrets fix" "$GCLOUD_ADC"
     fi
   else
-    echo "well-known ADC: missing"
-    issues=$((issues + 1))
+    if ! $json; then
+      echo "well-known ADC: missing"
+    fi
+    gcpctx_doctor_add ADC_MISSING error "well-known ADC missing" "$GCLOUD_ADC"
   fi
 
-  # Scan all managed credentials for open perms (never print contents)
   if [[ -d "$CONTEXTS_DIR" ]]; then
     local d cred mode
     shopt -s nullglob
@@ -1036,22 +1223,19 @@ cmd_doctor() {
       cred="${d}credentials.json"
       if [[ -f "$cred" ]]; then
         mode="$(file_mode_octal "$cred")"
-        if mode_too_open "$mode"; then
-          echo "ERROR: credentials world/group-accessible: $cred (mode $mode)"
-          issues=$((issues + 1))
+        if $perms_ok && mode_too_open "$mode"; then
+          gcpctx_doctor_add CRED_PERMS_OPEN error "credentials world/group-accessible (mode $mode)" "$cred"
         fi
       fi
       mode="$(file_mode_octal "$d")"
-      if mode_too_open "$mode"; then
-        echo "ERROR: context dir group/world-accessible: $d (mode $mode)"
-        issues=$((issues + 1))
+      if $perms_ok && mode_too_open "$mode"; then
+        gcpctx_doctor_add CONTEXT_DIR_PERMS_OPEN error "context dir group/world-accessible (mode $mode)" "$d"
       fi
     done
   fi
 
   if [[ -z "$name" ]]; then
-    echo "WARN: no active gcpctx context"
-    issues=$((issues + 1))
+    gcpctx_doctor_add NO_ACTIVE_CONTEXT warn "no active gcpctx context"
   else
     require_context "$name"
     local meta
@@ -1062,51 +1246,58 @@ cmd_doctor() {
     quota="$(json_get "$meta" quota_project)"
     gcloud_config="$(json_get "$meta" gcloud_config)"
     [[ -n "$quota" ]] || quota="$project"
-    echo "context $name → project=$project account=$account quota=$quota gcloud=$gcloud_config"
+    if ! $json; then
+      echo "context $name → project=$project account=$account quota=$quota gcloud=$gcloud_config"
+    fi
 
-    [[ -f "$creds" ]] || { echo "ERROR: missing credentials $creds"; issues=$((issues + 1)); }
+    [[ -f "$creds" ]] || gcpctx_doctor_add MISSING_CREDENTIALS error "missing credentials" "$creds"
 
     if [[ -n "${GOOGLE_CLOUD_PROJECT:-}" && "$GOOGLE_CLOUD_PROJECT" != "$project" ]]; then
-      echo "ERROR: GOOGLE_CLOUD_PROJECT ($GOOGLE_CLOUD_PROJECT) != context project ($project)"
-      issues=$((issues + 1))
+      gcpctx_doctor_add ENV_PROJECT_MISMATCH error "GOOGLE_CLOUD_PROJECT ($GOOGLE_CLOUD_PROJECT) != context project ($project)"
     fi
     if [[ -n "${GOOGLE_CLOUD_QUOTA_PROJECT:-}" && "$GOOGLE_CLOUD_QUOTA_PROJECT" != "$quota" ]]; then
-      echo "ERROR: GOOGLE_CLOUD_QUOTA_PROJECT ($GOOGLE_CLOUD_QUOTA_PROJECT) != context quota ($quota)"
-      issues=$((issues + 1))
+      gcpctx_doctor_add ENV_QUOTA_MISMATCH error "GOOGLE_CLOUD_QUOTA_PROJECT ($GOOGLE_CLOUD_QUOTA_PROJECT) != context quota ($quota)"
     fi
-    if [[ "$g_project" != "$project" ]]; then
-      echo "ERROR: gcloud project ($g_project) != context project ($project)"
-      issues=$((issues + 1))
+    if [[ -n "$gcloud_bin" && "$g_project" != "$project" ]]; then
+      gcpctx_doctor_add GCLOUD_PROJECT_MISMATCH error "gcloud project ($g_project) != context project ($project)"
     fi
-    if [[ "$g_account" != "$account" ]]; then
-      echo "ERROR: gcloud account ($g_account) != context account ($account)"
-      issues=$((issues + 1))
+    if [[ -n "$gcloud_bin" && "$g_account" != "$account" ]]; then
+      gcpctx_doctor_add GCLOUD_ACCOUNT_MISMATCH error "gcloud account ($g_account) != context account ($account)"
     fi
     if [[ -n "$adc_quota" && "$adc_quota" != "$quota" ]]; then
-      echo "ERROR: ADC quota_project_id ($adc_quota) != context quota ($quota)"
-      issues=$((issues + 1))
+      gcpctx_doctor_add ADC_QUOTA_MISMATCH error "ADC quota_project_id ($adc_quota) != context quota ($quota)"
     fi
     if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
       case "${GOOGLE_APPLICATION_CREDENTIALS}" in
         "$GCPCTX_HOME"/contexts/*) ;;
         *)
-          echo "ERROR: GOOGLE_APPLICATION_CREDENTIALS not under $GCPCTX_HOME/contexts/"
-          issues=$((issues + 1))
+          gcpctx_doctor_add GAC_PATH_OUTSIDE_STORE error "GOOGLE_APPLICATION_CREDENTIALS not under $GCPCTX_HOME/contexts/" "${GOOGLE_APPLICATION_CREDENTIALS}"
           ;;
       esac
       if [[ "$GOOGLE_APPLICATION_CREDENTIALS" != "$creds" ]]; then
-        echo "ERROR: GOOGLE_APPLICATION_CREDENTIALS points elsewhere"
-        issues=$((issues + 1))
+        gcpctx_doctor_add GAC_PATH_MISMATCH error "GOOGLE_APPLICATION_CREDENTIALS points elsewhere" "${GOOGLE_APPLICATION_CREDENTIALS}"
       fi
     fi
   fi
 
-  if [[ "$issues" -eq 0 ]]; then
-    echo "OK: no mismatches detected"
+  if $json; then
+    gcpctx_doctor_emit_json "$gcloud_bin" "$perms_ok" "$name"
   else
-    echo "FAIL: $issues issue(s) — run: eval \"\$(gcpctx use <name> --export)\" or gcpctx secrets fix"
-    exit 1
+    gcpctx_doctor_emit_text
   fi
+
+  local err_n
+  err_n="$(gcpctx_doctor_error_count)"
+  if [[ "$err_n" -eq 0 ]]; then
+    if ! $json; then
+      echo "OK: no errors detected"
+    fi
+    return 0
+  fi
+  if ! $json; then
+    echo "FAIL: $err_n error(s) — run: eval \"\$(gcpctx use <name> --export)\" or gcpctx secrets fix"
+  fi
+  exit 1
 }
 
 cmd_secrets() {
@@ -1122,7 +1313,7 @@ cmd_secrets_fix() {
   info "hardening permissions under $GCPCTX_HOME"
   chmod 700 "$GCPCTX_HOME" 2>/dev/null || true
   chmod 700 "$CONTEXTS_DIR" 2>/dev/null || true
-  mkdir -p -m 700 "$GCPCTX_HOME/tmp"
+  mkdir -p "$GCPCTX_HOME/tmp"
   chmod 700 "$GCPCTX_HOME/tmp" 2>/dev/null || true
   local d cred
   shopt -s nullglob
@@ -1264,14 +1455,14 @@ cmd_shell_setup() {
 }
 
 cmd_version() {
-  local ver
-  ver="$(read_package_version)"
-  [[ -n "$ver" ]] || ver="$VERSION"
-  echo "gcpctx $ver"
+  echo "gcpctx $(gcpctx_read_version "$(package_root)")"
 }
 
 cmd_bootstrap() {
   ensure_dirs
+  gcpctx_require_trusted_gcloud
+  GCPCTX_GCLOUD="$(gcpctx_gcloud_bin)"
+  export GCPCTX_GCLOUD
   info "importing gcloud configurations into ~/.gcpctx"
 
   python3 - <<'PY'
@@ -1286,8 +1477,9 @@ os.chmod(contexts, 0o700)
 (tmp := home / "tmp").mkdir(mode=0o700, parents=True, exist_ok=True)
 os.chmod(tmp, 0o700)
 
+gcloud_bin = os.environ.get("GCPCTX_GCLOUD") or "gcloud"
 raw = subprocess.check_output(
-    ["gcloud", "config", "configurations", "list", "--format=json"],
+    [gcloud_bin, "config", "configurations", "list", "--format=json"],
     text=True,
 )
 configs = json.loads(raw)
@@ -1373,11 +1565,14 @@ cmd_which() {
   local name
   name="$(read_active_name)"
   if [[ -n "$name" ]]; then
-    echo "$(context_dir "$name")"
-    echo "$(context_creds "$name")"
+    context_dir "$name"
+    context_creds "$name"
   fi
   if marker="$(find_marker 2>/dev/null)"; then
     echo "marker: $marker"
+  fi
+  if gcpctx_try_resolve_gcloud; then
+    echo "gcloud: $(gcpctx_gcloud_bin)"
   fi
 }
 
@@ -1409,6 +1604,10 @@ main() {
     current|status) cmd_current ${args[@]+"${args[@]}"} ;;
     env) cmd_env ${args[@]+"${args[@]}"} ;;
     exec) cmd_exec ${args[@]+"${args[@]}"} ;;
+    protect) cmd_protect ${args[@]+"${args[@]}"} ;;
+    unprotect) cmd_unprotect ${args[@]+"${args[@]}"} ;;
+    assert) cmd_assert ${args[@]+"${args[@]}"} ;;
+    completion) cmd_completion ${args[@]+"${args[@]}"} ;;
     doctor) cmd_doctor ${args[@]+"${args[@]}"} ;;
     secrets) cmd_secrets ${args[@]+"${args[@]}"} ;;
     bootstrap) cmd_bootstrap ${args[@]+"${args[@]}"} ;;

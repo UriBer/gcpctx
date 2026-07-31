@@ -24,7 +24,7 @@ hits=0
 while IFS= read -r f; do
   rel="${f#"$PKG"/}"
   case "$rel" in
-    bin/*|shell/*|README.md|LICENSE|package.json) ;;
+    bin/*|lib/*|shell/*|completions/*|README.md|LICENSE|SECURITY.md|CHANGELOG.md|VERSION|package.json) ;;
     *)
       echo "ERROR: unexpected path in tarball: $rel" >&2
       hits=$((hits + 1))

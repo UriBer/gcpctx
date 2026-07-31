@@ -60,7 +60,12 @@ teardown() { teardown_isolated_env; }
   eval "$("$GCPCTX" use dev --export)"
   run "$GCPCTX" secrets fix
   [ "$status" -eq 0 ]
-  mode="$(stat -f '%OLp' "$GCPCTX_HOME" 2>/dev/null || stat -c '%a' "$GCPCTX_HOME")"
-  # 700
-  [[ "$mode" == "700" ]]
+  # GNU stat: -c '%a'; BSD stat: -f '%OLp'. Never use GNU's -f (filesystem) first.
+  if stat --version >/dev/null 2>&1; then
+    mode="$(stat -c '%a' "$GCPCTX_HOME")"
+  else
+    mode="$(stat -f '%OLp' "$GCPCTX_HOME")"
+  fi
+  # Accept 700 or 0700
+  [[ "$mode" == "700" || "$mode" == "0700" ]]
 }

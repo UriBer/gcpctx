@@ -21,7 +21,8 @@ teardown_isolated_env() {
 seed_context() {
   local name="${1:-dev}"
   local project="${2:-example-dev-123456}"
-  mkdir -p -m 700 "$GCPCTX_HOME/contexts/$name"
+  mkdir -p "$GCPCTX_HOME/contexts/$name"
+  chmod 700 "$GCPCTX_HOME/contexts/$name" 2>/dev/null || true
   cat >"$GCPCTX_HOME/contexts/$name/meta.json" <<EOF
 {
   "name": "$name",

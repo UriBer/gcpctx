@@ -8,6 +8,8 @@ on:
 permissions: read-all
 jobs:
   analysis:
+    # Scorecard publish_results is most useful on public repos.
+    if: ${{ !github.event.repository.private || vars.ENABLE_SCORECARD == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       security-events: write

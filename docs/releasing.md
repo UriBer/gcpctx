@@ -3,11 +3,12 @@
 1. Ensure `package.json` version == `VERSION`
 2. Update `CHANGELOG.md`
 3. `npm run verify`
-4. Tag `vX.Y.Z` and push tags
-5. GitHub Actions Release builds archives, checksums, SBOM, attestations
-6. Set repository variable `NPM_PUBLISH=true` and configure trusted publisher / `NPM_TOKEN` for npm
-7. Update Homebrew formula SHA in `UriBer/homebrew-tap`
-8. Update Scoop hash when publishing the bucket
+4. Complete [owner runbook](owner-runbook.md) security + npm steps
+5. Tag `vX.Y.Z` and push tags
+6. GitHub Actions Release builds archives, checksums, SBOM, attestations
+7. Set repository variable `NPM_PUBLISH=true` and configure trusted publisher / `NPM_TOKEN` for npm
+8. Update Homebrew formula SHA in `UriBer/homebrew-tap`
+9. Update Scoop hash in `UriBer/scoop-gcpctx`
 
 ## Rollback
 

@@ -38,19 +38,23 @@ elif command -v gcpctx >/dev/null 2>&1; then
   unset _gcpctx_wh
 fi
 
+# shellcheck source=/dev/null
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${GCPCTX_BIN}")/.." && pwd)/shell/safe-eval.inc.sh"
+
 gcpctx() {
   local cmd="${1:-}"
   case "$cmd" in
     use|activate|deactivate|env)
       shift
-      eval "$("$GCPCTX_BIN" "$cmd" "$@" --export)"
+      _gcpctx_safe_eval "$("$GCPCTX_BIN" "$cmd" "$@" --export)"
       ;;
     project)
       if [[ "${2:-}" == "list" || "${2:-}" == "ls" || "${2:-}" == "scan" ]]; then
         "$GCPCTX_BIN" "$@"
       else
         shift
-        eval "$("$GCPCTX_BIN" project "$@" --export)"
+        _gcpctx_safe_eval "$("$GCPCTX_BIN" project "$@" --export)"
       fi
       ;;
     *)
@@ -133,7 +137,7 @@ _gcpctx_auto() {
   }
   if [[ "$marker" != "${_GCPCTX_LAST_MARKER}" ]]; then
     _GCPCTX_LAST_MARKER="$marker"
-    eval "$("$GCPCTX_BIN" activate --export)" 2>/dev/null || true
+    _gcpctx_safe_eval "$("$GCPCTX_BIN" activate --export)" 2>/dev/null || true
   fi
 }
 

@@ -8,12 +8,8 @@ class Gcpctx < Formula
   depends_on "python@3"
 
   def install
-    bin.install "bin/gcpctx"
-    lib.install Dir["lib/*"]
-    # Keep lib next to bin for package_root resolution — install tree:
-    prefix.install "lib"
-    (prefix/"shell").install Dir["shell/*"]
-    (prefix/"VERSION").write "0.3.0"
+    # Layout expected by bin/gcpctx package_root(): <prefix>/{bin,lib,shell,VERSION}
+    prefix.install "bin", "lib", "shell", "VERSION"
     doc.install "README.md", "LICENSE", "SECURITY.md"
   end
 
@@ -22,6 +18,7 @@ class Gcpctx < Formula
       Wire your shell (does not modify profiles during brew install):
         gcpctx shell-setup
       Requires the Google Cloud SDK (`gcloud`) on PATH.
+      Optional: pin a trusted binary with GCPCTX_GCLOUD=/absolute/path/to/gcloud
     EOS
   end
 

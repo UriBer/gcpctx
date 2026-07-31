@@ -7,7 +7,7 @@ CONTEXTS_DIR="$GCPCTX_HOME/contexts"
 ACTIVE_FILE="$GCPCTX_HOME/active"
 GCLOUD_ADC="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/application_default_credentials.json"
 MARKER_NAME=".gcpctx"
-VERSION="0.2.0"
+VERSION="0.2.1"
 
 usage() {
   cat <<'EOF'
@@ -32,8 +32,8 @@ Usage:
   gcpctx secrets fix        # chmod 700/600 on managed credential store
   gcpctx bootstrap          # import from existing gcloud configurations
   gcpctx sync-adc [NAME]    # copy context credentials to well-known ADC path
-  gcpctx shell-setup [--zshrc PATH]
-  gcpctx shell-path
+  gcpctx shell-setup [--zshrc PATH] [--bashrc PATH] [--pwsh-profile PATH]
+  gcpctx shell-path [--zsh|--bash|--ps1]
   gcpctx which
   gcpctx version
   gcpctx help
@@ -716,7 +716,12 @@ cmd_current() {
 
   case "$mode" in
     prompt)
-      printf 'gcp:%s:%s' "$name" "$project"
+      # Match shell prompt: (gcp:name:project) or (gcp:name)
+      if [[ -n "$project" ]]; then
+        printf '(gcp:%s:%s)' "$name" "$project"
+      else
+        printf '(gcp:%s)' "$name"
+      fi
       ;;
     json)
       python3 -c '
@@ -1135,40 +1140,127 @@ cmd_secrets_fix() {
 }
 
 cmd_shell_path() {
-  local root zsh
+  local root kind="${1:-}"
   root="$(package_root)"
-  zsh="$root/shell/gcpctx.zsh"
-  [[ -f "$zsh" ]] || die "shell hook not found at $zsh"
-  echo "$zsh"
+  case "$kind" in
+    ""|--zsh|zsh)
+      [[ -f "$root/shell/gcpctx.zsh" ]] || die "shell hook not found at $root/shell/gcpctx.zsh"
+      echo "$root/shell/gcpctx.zsh"
+      ;;
+    --bash|bash)
+      [[ -f "$root/shell/gcpctx.bash" ]] || die "shell hook not found at $root/shell/gcpctx.bash"
+      echo "$root/shell/gcpctx.bash"
+      ;;
+    --ps1|--pwsh|ps1|pwsh|powershell)
+      [[ -f "$root/shell/gcpctx.ps1" ]] || die "shell hook not found at $root/shell/gcpctx.ps1"
+      echo "$root/shell/gcpctx.ps1"
+      ;;
+    *)
+      die "usage: gcpctx shell-path [--zsh|--bash|--ps1]"
+      ;;
+  esac
+}
+
+_gcpctx_append_block() {
+  # _gcpctx_append_block <file> <marker_start> <marker_end> <line_to_source>
+  local file="$1" start="$2" end="$3" line="$4"
+  mkdir -p "$(dirname "$file")" 2>/dev/null || true
+  touch "$file"
+  if grep -qF "$start" "$file" 2>/dev/null; then
+    info "already contains gcpctx block ($file)"
+    return 0
+  fi
+  {
+    echo ""
+    echo "$start"
+    echo "$line"
+    echo "$end"
+  } >> "$file"
+  info "appended gcpctx block to $file"
 }
 
 cmd_shell_setup() {
-  local zshrc="${ZSHRC:-$HOME/.zshrc}"
+  local zshrc="" bashrc="" pwsh_profile="" do_zsh=false do_bash=false do_pwsh=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --zshrc) zshrc="$2"; shift 2 ;;
-      *) die "usage: gcpctx shell-setup [--zshrc PATH]" ;;
+      --zshrc) zshrc="$2"; do_zsh=true; shift 2 ;;
+      --bashrc) bashrc="$2"; do_bash=true; shift 2 ;;
+      --pwsh-profile) pwsh_profile="$2"; do_pwsh=true; shift 2 ;;
+      --zsh) do_zsh=true; shift ;;
+      --bash) do_bash=true; shift ;;
+      --pwsh|--powershell) do_pwsh=true; shift ;;
+      --all) do_zsh=true; do_bash=true; do_pwsh=true; shift ;;
+      *) die "usage: gcpctx shell-setup [--zshrc PATH] [--bashrc PATH] [--pwsh-profile PATH] [--zsh|--bash|--pwsh|--all]" ;;
     esac
   done
-  local hook
-  hook="$(cmd_shell_path)"
-  local marker_start="# >>> gcpctx >>>"
-  local marker_end="# <<< gcpctx <<<"
-  touch "$zshrc"
-  if grep -qF "$marker_start" "$zshrc" 2>/dev/null; then
-    info "zshrc already contains gcpctx block ($zshrc)"
-  else
-    {
-      echo ""
-      echo "$marker_start"
-      echo "source \"$hook\""
-      echo "$marker_end"
-    } >> "$zshrc"
-    info "appended gcpctx block to $zshrc"
+
+  # Auto-detect when no shell flags given
+  if ! $do_zsh && ! $do_bash && ! $do_pwsh; then
+    local shell_name
+    shell_name="$(basename "${SHELL:-}")"
+    case "$shell_name" in
+      zsh) do_zsh=true ;;
+      bash) do_bash=true ;;
+      *) do_zsh=true; do_bash=true ;;
+    esac
+    # Windows / PowerShell available
+    if command -v pwsh >/dev/null 2>&1 || command -v powershell >/dev/null 2>&1 || command -v powershell.exe >/dev/null 2>&1; then
+      do_pwsh=true
+    fi
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*) do_bash=true; do_pwsh=true ;;
+    esac
   fi
-  info "hook: $hook"
-  info "next: exec zsh   # or: source $zshrc"
-  info "then: gcpctx bootstrap && gcpctx doctor"
+
+  [[ -n "$zshrc" ]] || zshrc="${ZSHRC:-$HOME/.zshrc}"
+  [[ -n "$bashrc" ]] || bashrc="${BASHRC:-$HOME/.bashrc}"
+  if [[ -z "$pwsh_profile" ]]; then
+    if command -v pwsh >/dev/null 2>&1; then
+      pwsh_profile="$(pwsh -NoProfile -Command 'echo $PROFILE' 2>/dev/null | tr -d '\r' || true)"
+    elif command -v powershell >/dev/null 2>&1; then
+      pwsh_profile="$(powershell -NoProfile -Command 'echo $PROFILE' 2>/dev/null | tr -d '\r' || true)"
+    elif command -v powershell.exe >/dev/null 2>&1; then
+      pwsh_profile="$(powershell.exe -NoProfile -Command 'echo $PROFILE' 2>/dev/null | tr -d '\r' || true)"
+    else
+      pwsh_profile=""
+    fi
+  fi
+
+  local root hook
+  root="$(package_root)"
+
+  if $do_zsh; then
+    hook="$root/shell/gcpctx.zsh"
+    [[ -f "$hook" ]] || die "missing $hook"
+    _gcpctx_append_block "$zshrc" "# >>> gcpctx >>>" "# <<< gcpctx <<<" "source \"$hook\""
+    info "zsh hook: $hook"
+  fi
+
+  if $do_bash; then
+    hook="$root/shell/gcpctx.bash"
+    [[ -f "$hook" ]] || die "missing $hook"
+    _gcpctx_append_block "$bashrc" "# >>> gcpctx bash >>>" "# <<< gcpctx bash <<<" "source \"$hook\""
+    info "bash hook: $hook"
+  fi
+
+  if $do_pwsh; then
+    hook="$root/shell/gcpctx.ps1"
+    [[ -f "$hook" ]] || die "missing $hook"
+    if [[ -z "$pwsh_profile" ]]; then
+      info "warn: PowerShell not found; skip pwsh profile (pass --pwsh-profile PATH)"
+    else
+      # PowerShell dot-source line
+      local ps_line=". \"$hook\""
+      # On Windows paths from pwsh may use backslashes — keep as returned
+      _gcpctx_append_block "$pwsh_profile" "# >>> gcpctx pwsh >>>" "# <<< gcpctx pwsh <<<" "$ps_line"
+      info "pwsh hook: $hook"
+      info "pwsh profile: $pwsh_profile"
+    fi
+  fi
+
+  info "prompt shows (gcp:context:project) when a context is active"
+  info "disable with: export GCPCTX_DISABLE_PROMPT=1"
+  info "next: restart your shell, then: gcpctx bootstrap && gcpctx doctor"
 }
 
 cmd_version() {

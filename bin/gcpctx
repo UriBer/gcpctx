@@ -7,7 +7,7 @@ CONTEXTS_DIR="$GCPCTX_HOME/contexts"
 ACTIVE_FILE="$GCPCTX_HOME/active"
 GCLOUD_ADC="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/application_default_credentials.json"
 MARKER_NAME=".gcpctx"
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 usage() {
   cat <<'EOF'
@@ -17,7 +17,11 @@ Usage:
   gcpctx init [--name NAME] [--project PROJECT] [--account ACCOUNT]
               [--region REGION] [--zone ZONE] [--gcloud-config NAME]
   gcpctx login [NAME]
-  gcpctx use <name>
+  gcpctx use <name> [--project PROJECT]
+  gcpctx project <project-id>              # switch project in active context
+  gcpctx project set <project-id>
+  gcpctx scan [NAME] [--json]              # discover projects for context account
+  gcpctx projects [NAME] [--json] [--refresh]
   gcpctx activate
   gcpctx deactivate
   gcpctx list
@@ -31,16 +35,25 @@ Usage:
   gcpctx version
   gcpctx help
 
+Contexts are account/env units. Scan loads the projects that account can
+access; then switch projects inside the context without re-login:
+
+  gcpctx use prod
+  gcpctx scan
+  gcpctx projects
+  gcpctx use prod --project other-gcp-project
+  gcpctx project yet-another-project
+
 Shell activation (required for env in your interactive shell):
   eval "$(gcpctx use dev --export)"
   eval "$(gcpctx activate --export)"
   eval "$(gcpctx deactivate --export)"
 
-Or install the zsh wrapper from shell/gcpctx.zsh so use/activate/deactivate
-auto-eval without typing eval.
+Or install the zsh wrapper from shell/gcpctx.zsh so use/activate/deactivate/
+project auto-eval without typing eval.
 
 Folder marker:
-  ./.gcpctx  →  {"name":"dev"}
+  ./.gcpctx  →  {"name":"prod","project":"my-gcp-project"}
 
 App / API env vars set on activate:
   GOOGLE_APPLICATION_CREDENTIALS
@@ -108,6 +121,10 @@ context_creds() {
   echo "$(context_dir "$1")/credentials.json"
 }
 
+context_projects() {
+  echo "$(context_dir "$1")/projects.json"
+}
+
 context_exists() {
   [[ -f "$(context_meta "$1")" ]]
 }
@@ -140,24 +157,40 @@ find_marker() {
   done
 }
 
-marker_name() {
+marker_field() {
+  # marker_field <name|project>
+  local field="$1"
   local marker
   marker="$(find_marker)" || return 1
   python3 -c '
 import json, sys
-path = sys.argv[1]
+path, field = sys.argv[1], sys.argv[2]
 raw = open(path).read().strip()
 if not raw:
     sys.exit(1)
 if raw.startswith("{"):
     data = json.loads(raw)
-    name = data.get("name") or data.get("context")
+    if field == "name":
+        val = data.get("name") or data.get("context") or ""
+    else:
+        val = data.get(field) or ""
 else:
-    name = raw.split()[0]
-if not name:
+    parts = raw.split()
+    val = parts[0] if field == "name" and parts else ""
+    if field == "project" and len(parts) > 1:
+        val = parts[1]
+if not val:
     sys.exit(1)
-print(name)
-' "$marker"
+print(val)
+' "$marker" "$field"
+}
+
+marker_name() {
+  marker_field name
+}
+
+marker_project() {
+  marker_field project 2>/dev/null || true
 }
 
 ensure_gcloud_config() {
@@ -165,8 +198,11 @@ ensure_gcloud_config() {
   if ! gcloud config configurations describe "$name" &>/dev/null; then
     gcloud config configurations create "$name" --quiet >/dev/null
   fi
-  gcloud --configuration="$name" config set account "$account" --quiet >/dev/null
-  gcloud --configuration="$name" config set project "$project" --quiet >/dev/null
+  # Clear ambient project env so gcloud writes the configuration file, not a no-op override
+  env -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT -u GCLOUD_PROJECT \
+    gcloud --configuration="$name" config set account "$account" --quiet >/dev/null
+  env -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT -u GCLOUD_PROJECT \
+    gcloud --configuration="$name" config set project "$project" --quiet >/dev/null
   if [[ -n "$region" ]]; then
     gcloud --configuration="$name" config set compute/region "$region" --quiet >/dev/null || true
   fi
@@ -177,7 +213,8 @@ ensure_gcloud_config() {
 
 activate_gcloud_config() {
   local name="$1"
-  gcloud config configurations activate "$name" --quiet >/dev/null
+  env -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT -u GCLOUD_PROJECT \
+    gcloud config configurations activate "$name" --quiet >/dev/null
 }
 
 sync_well_known_adc() {
@@ -192,8 +229,9 @@ sync_well_known_adc() {
 
 print_exports() {
   local name="$1"
+  local project_override="${2:-}"
   require_context "$name"
-  local meta creds project account quota gcloud_config region
+  local meta creds project account quota gcloud_config region zone
   meta="$(context_meta "$name")"
   creds="$(context_creds "$name")"
   [[ -f "$creds" ]] || die "no credentials for '$name' (run: gcpctx login $name)"
@@ -201,10 +239,19 @@ print_exports() {
   account="$(json_get "$meta" account)"
   quota="$(json_get "$meta" quota_project)"
   gcloud_config="$(json_get "$meta" gcloud_config)"
-  [[ -n "$quota" ]] || quota="$project"
+  region="$(json_get "$meta" region)"
+  zone="$(json_get "$meta" zone)"
   [[ -n "$gcloud_config" ]] || gcloud_config="$name"
 
-  # Update quota_project_id inside credentials copy used for ADC
+  if [[ -n "$project_override" ]]; then
+    project="$(resolve_project_id "$name" "$project_override")"
+    quota="$project"
+    json_write_meta "$meta" project "$project" quota_project "$quota"
+  else
+    [[ -n "$quota" ]] || quota="$project"
+  fi
+
+  # Update ADC quota before gcloud config so set-project does not warn about mismatch
   python3 -c '
 import json, sys
 path, quota = sys.argv[1], sys.argv[2]
@@ -216,8 +263,10 @@ with open(path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 ' "$creds" "$quota"
-
   sync_well_known_adc "$name"
+
+  # Keep named gcloud configuration aligned with selected project
+  ensure_gcloud_config "$gcloud_config" "$account" "$project" "$region" "$zone"
   activate_gcloud_config "$gcloud_config"
   echo "$name" > "$ACTIVE_FILE"
 
@@ -231,6 +280,53 @@ export GOOGLE_CLOUD_QUOTA_PROJECT=$(printf '%q' "$quota")
 export CLOUDSDK_CORE_PROJECT=$(printf '%q' "$project")
 export CLOUDSDK_ACTIVE_CONFIG_NAME=$(printf '%q' "$gcloud_config")
 EOF
+}
+
+resolve_project_id() {
+  # resolve_project_id <context> <id-or-name>
+  local name="$1" needle="$2"
+  local projects_file
+  projects_file="$(context_projects "$name")"
+  if [[ -f "$projects_file" ]]; then
+    python3 -c '
+import json, sys
+path, needle = sys.argv[1], sys.argv[2]
+data = json.load(open(path))
+projects = data.get("projects") or []
+# exact projectId
+for p in projects:
+    if p.get("projectId") == needle:
+        print(needle)
+        raise SystemExit(0)
+# exact display name (unique)
+matches = [p.get("projectId") for p in projects if (p.get("name") or "") == needle]
+if len(matches) == 1:
+    print(matches[0])
+    raise SystemExit(0)
+if len(matches) > 1:
+    sys.stderr.write("gcpctx: ambiguous project name %r matches: %s\n" % (needle, ", ".join(matches)))
+    raise SystemExit(2)
+# not in cache — pass through (may still be valid)
+print(needle)
+' "$projects_file" "$needle"
+  else
+    echo "$needle"
+  fi
+}
+
+warn_if_unknown_project() {
+  local name="$1" project="$2"
+  local projects_file
+  projects_file="$(context_projects "$name")"
+  [[ -f "$projects_file" ]] || return 0
+  python3 -c '
+import json, sys
+path, project = sys.argv[1], sys.argv[2]
+projects = json.load(open(path)).get("projects") or []
+ids = {p.get("projectId") for p in projects}
+if project not in ids:
+    sys.stderr.write("gcpctx: warning: %r not in last scan for this context (run: gcpctx scan)\n" % project)
+' "$projects_file" "$project"
 }
 
 print_deactivate_exports() {
@@ -353,33 +449,60 @@ with open(path, "w") as f:
 }
 
 cmd_use() {
-  local name="${1:-}"
-  [[ -n "$name" ]] || die "usage: gcpctx use <name>"
+  local name="" project=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project|-p)
+        [[ $# -ge 2 ]] || die "usage: gcpctx use <name> [--project PROJECT]"
+        project="$2"
+        shift 2
+        ;;
+      -*)
+        die "unknown flag: $1 (usage: gcpctx use <name> [--project PROJECT])"
+        ;;
+      *)
+        if [[ -z "$name" ]]; then
+          name="$1"
+        elif [[ -z "$project" ]]; then
+          # allow: gcpctx use prod my-project
+          project="$1"
+        else
+          die "usage: gcpctx use <name> [--project PROJECT]"
+        fi
+        shift
+        ;;
+    esac
+  done
+  [[ -n "$name" ]] || die "usage: gcpctx use <name> [--project PROJECT]"
   require_context "$name"
+  if [[ -n "$project" ]]; then
+    project="$(resolve_project_id "$name" "$project")"
+    warn_if_unknown_project "$name" "$project"
+  fi
   if $want_export; then
-    print_exports "$name"
+    print_exports "$name" "$project"
   else
-    # Still perform side effects, tell user to export
-    print_exports "$name" >/dev/null
-    # Re-run to show? print_exports already did side effects once.
-    # Actually first call consumed stdout to /dev/null but did the work.
-    # Re-print for eval convenience message.
-    info "activated '$name' (files updated). To set env in this shell:"
-    info "  eval \"\$(gcpctx use $name --export)\""
+    print_exports "$name" "$project" >/dev/null
+    info "activated '$name'${project:+ (project=$project)}. To set env in this shell:"
+    info "  eval \"\$(gcpctx use $name${project:+ --project $project} --export)\""
     info "Or install shell/gcpctx.zsh wrapper."
-    # Print current for humans
     cmd_current
   fi
 }
 
 cmd_activate() {
-  local name
+  local name project
   name="$(marker_name)" || die "no .gcpctx marker found upward from $PWD"
+  project="$(marker_project)"
+  if [[ -n "$project" ]]; then
+    project="$(resolve_project_id "$name" "$project")"
+    warn_if_unknown_project "$name" "$project"
+  fi
   if $want_export; then
-    print_exports "$name"
+    print_exports "$name" "$project"
   else
-    print_exports "$name" >/dev/null
-    info "activated '$name' from .gcpctx. To set env in this shell:"
+    print_exports "$name" "$project" >/dev/null
+    info "activated '$name'${project:+ (project=$project)} from .gcpctx. To set env in this shell:"
     info "  eval \"\$(gcpctx activate --export)\""
     cmd_current
   fi
@@ -453,11 +576,21 @@ cmd_current() {
 
   case "$mode" in
     prompt)
-      printf 'gcp:%s' "$name"
+      printf 'gcp:%s:%s' "$name" "$project"
       ;;
     json)
       python3 -c '
 import json, sys, os
+projects_path = sys.argv[7]
+scanned = 0
+scanned_at = ""
+if os.path.isfile(projects_path):
+    try:
+        cached = json.load(open(projects_path))
+        scanned = len(cached.get("projects") or [])
+        scanned_at = cached.get("scanned_at") or ""
+    except Exception:
+        pass
 print(json.dumps({
   "active": True,
   "name": sys.argv[1],
@@ -467,10 +600,16 @@ print(json.dumps({
   "gcloud_config": sys.argv[5],
   "credentials_path": sys.argv[6],
   "credentials_present": os.path.isfile(sys.argv[6]),
+  "projects_scanned": scanned,
+  "projects_scanned_at": scanned_at,
 }, indent=2))
-' "$name" "$account" "$project" "$quota" "$gcloud_config" "$creds"
+' "$name" "$account" "$project" "$quota" "$gcloud_config" "$creds" "$(context_projects "$name")"
       ;;
     text)
+      local scanned_n="(none)"
+      if [[ -f "$(context_projects "$name")" ]]; then
+        scanned_n="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("projects") or []))' "$(context_projects "$name")")"
+      fi
       cat <<EOF
 name:        $name
 account:     $account
@@ -478,6 +617,7 @@ project:     $project
 quota:       $quota
 gcloud:      $gcloud_config
 credentials: $creds
+projects:    $scanned_n scanned
 EOF
       ;;
   esac
@@ -497,16 +637,186 @@ cmd_exec() {
     shift
   fi
   [[ $# -gt 0 ]] || die "usage: gcpctx exec -- <command>..."
-  local name
+  local name project=""
   name="$(read_active_name)"
   if [[ -z "$name" ]]; then
     name="$(marker_name 2>/dev/null || true)"
+    project="$(marker_project)"
   fi
   [[ -n "$name" ]] || die "no context (use .gcpctx or gcpctx use)"
   # Apply env in a subshell
   # shellcheck disable=SC1090
-  eval "$(print_exports "$name")"
+  eval "$(print_exports "$name" "$project")"
   exec "$@"
+}
+
+cmd_scan() {
+  local name="" json=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=true; shift ;;
+      -*) die "unknown flag: $1" ;;
+      *) name="$1"; shift ;;
+    esac
+  done
+  if [[ -z "$name" ]]; then
+    name="$(read_active_name)"
+  fi
+  if [[ -z "$name" ]]; then
+    name="$(marker_name 2>/dev/null || true)"
+  fi
+  [[ -n "$name" ]] || die "specify context: gcpctx scan <name>"
+  require_context "$name"
+
+  local meta account gcloud_config projects_file
+  meta="$(context_meta "$name")"
+  account="$(json_get "$meta" account)"
+  gcloud_config="$(json_get "$meta" gcloud_config)"
+  [[ -n "$gcloud_config" ]] || gcloud_config="$name"
+  projects_file="$(context_projects "$name")"
+
+  info "scanning projects for context '$name' (account=$account)…"
+  # Prefer named configuration so the correct account is used
+  if ! gcloud --configuration="$gcloud_config" projects list --format=json >"${projects_file}.tmp" 2>/tmp/gcpctx-scan.err; then
+    rm -f "${projects_file}.tmp"
+    cat /tmp/gcpctx-scan.err >&2 || true
+    die "projects list failed (is account logged in? gcloud auth login $account)"
+  fi
+
+  python3 -c '
+import json, sys, datetime
+raw_path, out_path, account, ctx = sys.argv[1:5]
+raw = json.load(open(raw_path))
+projects = []
+for p in raw:
+    state = p.get("lifecycleState") or p.get("state") or "ACTIVE"
+    if state in ("DELETE_REQUESTED", "DELETED"):
+        continue
+    projects.append({
+        "projectId": p.get("projectId") or "",
+        "name": p.get("name") or "",
+        "projectNumber": str(p.get("projectNumber") or ""),
+        "lifecycleState": state,
+    })
+projects.sort(key=lambda x: x["projectId"])
+out = {
+    "scanned_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+    "account": account,
+    "context": ctx,
+    "projects": projects,
+}
+with open(out_path, "w") as f:
+    json.dump(out, f, indent=2)
+    f.write("\n")
+' "${projects_file}.tmp" "$projects_file" "$account" "$name"
+  rm -f "${projects_file}.tmp"
+
+  if $json; then
+    cat "$projects_file"
+  else
+    local count
+    count="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("projects") or []))' "$projects_file")"
+    info "cached $count project(s) → $projects_file"
+    cmd_projects "$name"
+  fi
+}
+
+cmd_projects() {
+  local name="" json=false refresh=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=true; shift ;;
+      --refresh) refresh=true; shift ;;
+      -*) die "unknown flag: $1" ;;
+      *) name="$1"; shift ;;
+    esac
+  done
+  if [[ -z "$name" ]]; then
+    name="$(read_active_name)"
+  fi
+  if [[ -z "$name" ]]; then
+    name="$(marker_name 2>/dev/null || true)"
+  fi
+  [[ -n "$name" ]] || die "specify context: gcpctx projects <name>"
+  require_context "$name"
+
+  if $refresh || [[ ! -f "$(context_projects "$name")" ]]; then
+    local scan_args=("$name")
+    $json && scan_args+=(--json)
+    cmd_scan "${scan_args[@]}"
+    return
+  fi
+
+  local projects_file active_project
+  projects_file="$(context_projects "$name")"
+  active_project="$(json_get "$(context_meta "$name")" project)"
+
+  if $json; then
+    cat "$projects_file"
+    return
+  fi
+
+  python3 -c '
+import json, sys
+path, active = sys.argv[1], sys.argv[2]
+data = json.load(open(path))
+projects = data.get("projects") or []
+print("%-36s %-40s %s" % ("PROJECT_ID", "NAME", "ACTIVE"))
+for p in projects:
+    pid = p.get("projectId") or ""
+    mark = "*" if pid == active else ""
+    print("%-36s %-40s %s" % (pid, (p.get("name") or "")[:40], mark))
+print("")
+print("context=%s account=%s scanned_at=%s count=%d" % (
+    data.get("context") or "",
+    data.get("account") or "",
+    data.get("scanned_at") or "",
+    len(projects),
+))
+' "$projects_file" "$active_project"
+}
+
+cmd_project() {
+  local sub="${1:-}"
+  case "$sub" in
+    list|ls)
+      shift
+      cmd_projects "$@"
+      return
+      ;;
+    scan)
+      shift
+      cmd_scan "$@"
+      return
+      ;;
+    set)
+      shift
+      ;;
+    ""|-h|--help)
+      die "usage: gcpctx project <project-id> | gcpctx project set <project-id> | gcpctx project list"
+      ;;
+    -*)
+      die "usage: gcpctx project <project-id>"
+      ;;
+  esac
+
+  local project="${1:-}"
+  [[ -n "$project" ]] || die "usage: gcpctx project <project-id>"
+  local name
+  name="$(read_active_name)"
+  [[ -n "$name" ]] || die "no active context (gcpctx use <name> first)"
+  require_context "$name"
+  project="$(resolve_project_id "$name" "$project")"
+  warn_if_unknown_project "$name" "$project"
+
+  if $want_export; then
+    print_exports "$name" "$project"
+  else
+    print_exports "$name" "$project" >/dev/null
+    info "set project '$project' on context '$name'. To set env in this shell:"
+    info "  eval \"\$(gcpctx project $project --export)\""
+    cmd_current
+  fi
 }
 
 cmd_doctor() {
@@ -711,6 +1021,9 @@ main() {
     init) cmd_init ${args[@]+"${args[@]}"} ;;
     login) cmd_login ${args[@]+"${args[@]}"} ;;
     use) cmd_use ${args[@]+"${args[@]}"} ;;
+    project) cmd_project ${args[@]+"${args[@]}"} ;;
+    scan) cmd_scan ${args[@]+"${args[@]}"} ;;
+    projects) cmd_projects ${args[@]+"${args[@]}"} ;;
     activate) cmd_activate ${args[@]+"${args[@]}"} ;;
     deactivate) cmd_deactivate ${args[@]+"${args[@]}"} ;;
     list|ls) cmd_list ${args[@]+"${args[@]}"} ;;

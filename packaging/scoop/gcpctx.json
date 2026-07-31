@@ -4,7 +4,7 @@
   "homepage": "https://github.com/UriBer/gcpctx",
   "license": "Apache-2.0",
   "url": "https://github.com/UriBer/gcpctx/releases/download/v0.3.0/gcpctx-0.3.0.zip",
-  "hash": "REPLACE_WITH_RELEASE_SHA256",
+  "hash": "c1e0beb667ba91e7b804c2d57f9698c6e0371a9bfc3c936871d7974d6e0221d7",
   "bin": "bin\\gcpctx.cmd",
   "notes": [
     "gcpctx is a Bash CLI. Install Git for Windows or WSL.",

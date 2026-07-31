@@ -1,0 +1,37 @@
+name: CI
+on:
+  push:
+    branches: [main, release/**]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "20"
+      - name: Install bats (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          if command -v brew >/dev/null; then brew install bats-core shellcheck shfmt; fi
+          if command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y bats shellcheck; fi
+      - name: Verify (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x bin/gcpctx scripts/*.sh test/helpers/bin/gcloud
+          npm run verify
+      - name: Smoke (Windows Git Bash)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          chmod +x bin/gcpctx
+          ./bin/gcpctx version
+          ./bin/gcpctx help
+          npm run pack:check

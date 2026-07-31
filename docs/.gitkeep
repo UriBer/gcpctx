@@ -1,0 +1,2 @@
+# >>> gcpctx PowerShell env --json integration (snippet for docs)
+# Prefer structured JSON over parsing Bash export syntax.

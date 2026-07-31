@@ -17,3 +17,8 @@ tmp/
 scripts/
 examples/
 install.sh
+test/
+docs/
+site/
+packaging/
+.github/

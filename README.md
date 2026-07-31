@@ -1,146 +1,81 @@
-# gcpctx
+# The missing context manager for Google Cloud
 
-Switch Google Cloud **account + project + Application Default Credentials (ADC)** as one unit — so CLI tools, client libraries, and scripts stop creating resources in the wrong project or burning quota on the wrong billing/quota project.
+> Switch your GCP account, project, gcloud configuration, ADC and quota project as one safe context.
 
-## Install (npm)
+**Stop deploying to the wrong GCP project.**
 
 ```bash
 npm install -g gcpctx
-gcpctx shell-setup          # wires zsh and/or bash (and PowerShell if present)
-# restart shell
+gcpctx shell-setup
 gcpctx bootstrap
+gcpctx use prod
+# prompt → (gcp:prod:your-project)
+gcpctx assert --project your-project
 gcpctx doctor
 ```
 
-Requires: `bash`, `python3`, [`gcloud`](https://cloud.google.com/sdk) CLI.
+`gcloud config configurations` only change the CLI. Application Default Credentials (used by SDKs, Terraform providers, many AI coding agents) are separate and global. gcpctx aligns them.
 
-| Platform | Shells |
-|----------|--------|
-| macOS / Linux | **zsh**, **bash** |
-| Windows | **PowerShell** (needs Git Bash or WSL) + **Git Bash** |
-| Windows CMD | Not supported — use PowerShell or Git Bash |
+## Why gcloud configurations alone are insufficient
 
-```bash
-# explicit shells
-gcpctx shell-setup --zsh
-gcpctx shell-setup --bash
-gcpctx shell-setup --pwsh
-gcpctx shell-setup --all
-```
+| Mechanism | Affects `gcloud` CLI | Affects client libraries / ADC |
+|-----------|---------------------|--------------------------------|
+| `gcloud config configurations activate` | Yes | No |
+| `gcloud auth application-default login` | No | Yes (global file) |
+| **gcpctx use** | Yes | Yes (per-context ADC + env) |
 
-Fallback from a clone: `./install.sh`
-
-## Prompt (venv-style)
-
-When a context is active, the prompt shows the env before the caret:
-
-```text
-(gcp:prod:dgt-gcp-moe-dlk-data-prod) user@host ~ %
-```
-
-Works in zsh, bash, and PowerShell. Disable with:
+## Install
 
 ```bash
-export GCPCTX_DISABLE_PROMPT=1
-# PowerShell: $env:GCPCTX_DISABLE_PROMPT = '1'
+# npm (macOS, Linux, Windows with Git Bash/WSL)
+npm install -g gcpctx
+gcpctx shell-setup
+
+# from source
+./install.sh
 ```
 
-## Why
+Homebrew (after tap publish): `brew install UriBer/tap/gcpctx`  
+Scoop: see `packaging/scoop/`  
+WinGet: not offered yet — see `packaging/winget/README.md`
 
-`gcloud config configurations activate` only affects the `gcloud` CLI.  
-ADC is **global** and is what client libraries use. Mixing them causes wrong-project creates and quota errors.
+## Safety model
 
-`gcpctx` keeps a credentials file **per context** and activates them with env vars Google SDKs already understand.
+- Credential **paths** may be printed; credential **bodies** are never printed
+- No telemetry
+- Protected contexts, `assert`, and `exec --require-context` for scripts/agents
+- See [SECURITY.md](SECURITY.md)
 
-## Three surfaces
+This does **not** make every command safe. Apply IAM least privilege.
 
-| Surface | How |
-|---------|-----|
-| **Folder** (like `.venv`) | Put `.gcpctx` in a repo → shell cd-hook auto-activates |
-| **Command** (like `npm`) | `gcpctx use prod` / `gcpctx exec -- …` |
-| **API / apps** | Standard env vars + `gcpctx current --json` |
-
-## Quick start
+## Common workflows
 
 ```bash
-gcpctx bootstrap
 gcpctx login prod
-gcpctx login dev
-
-gcpctx use prod              # prompt → (gcp:prod:…)
-gcpctx scan
-gcpctx projects
-gcpctx use prod --project other-project
-gcpctx project other-project
-
-echo '{"name":"prod","project":"my-gcp-project"}' > .gcpctx
+gcpctx use prod --project other-id
+gcpctx protect prod
+gcpctx assert --context prod --project other-id
+gcpctx exec --require-context prod -- terraform apply
 ```
 
-## App / API env vars
+Repo marker (safe to commit):
 
-On activate (paths and ids only — **never** token contents):
+```json
+{"name":"dev","project":"example-dev-123456"}
+```
 
-| Variable | Purpose |
+## Platform support
+
+| Platform | Support |
 |----------|---------|
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to this context's ADC JSON |
-| `GOOGLE_CLOUD_PROJECT` | Default project for SDKs |
-| `GOOGLE_CLOUD_QUOTA_PROJECT` | Quota project for ADC |
-| `CLOUDSDK_CORE_PROJECT` | gcloud project |
-| `CLOUDSDK_ACTIVE_CONFIG_NAME` | Named gcloud configuration |
-| `GCPCTX_NAME` | Active context name |
-
-```bash
-gcpctx current --json
-gcpctx current --prompt    # (gcp:name:project)
-```
-
-## Security
-
-**Invariant:** refresh tokens, client secrets, and credential JSON bodies never leave the machine via npm pack, CLI stdout/stderr, `--json`, or `--export`.
-
-| Control | Behavior |
-|---------|----------|
-| Local store | `~/.gcpctx` mode `700`; `credentials.json` mode `600` |
-| Export / JSON | Paths and project metadata only |
-| Doctor | Permission checks; never dumps ADC JSON |
-| Repair | `gcpctx secrets fix` or `gcpctx doctor --fix` |
-| Publish | `npm run pack:check` blocks secret patterns in the tarball |
-
-```bash
-gcpctx secrets fix
-gcpctx doctor
-```
-
-## Layout
-
-```
-~/.gcpctx/                    # mode 700
-  contexts/<name>/            # mode 700
-    meta.json
-    credentials.json          # mode 600 — never commit
-    projects.json
-  tmp/
-
-<repo>/.gcpctx                # {"name":"prod","project":"…"} — safe to commit
-```
-
-## Commands
-
-```
-gcpctx init | login | use | project | scan | projects
-gcpctx activate | deactivate | list | current | env | exec
-gcpctx doctor [--fix] | secrets fix
-gcpctx bootstrap | sync-adc
-gcpctx shell-setup | shell-path [--zsh|--bash|--ps1]
-gcpctx which | version
-```
-
-Without the shell wrapper:
-
-```bash
-eval "$(gcpctx use prod --export)"
-```
+| macOS / Linux | Native Bash CLI + zsh/bash hooks |
+| Windows | npm install; run via **Git Bash** or **WSL**; PowerShell wrapper available |
+| Windows CMD | Unsupported |
 
 ## License
 
-UNLICENSED — all rights reserved. Install via npm for use; source remains private unless otherwise stated.
+Apache-2.0 — see [LICENSE](LICENSE)
+
+## Contributing / Security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).

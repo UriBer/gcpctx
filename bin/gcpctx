@@ -545,12 +545,23 @@ cmd_login() {
   info "browser will open — sign in as: $account"
 
   # Ensure gcloud CLI session for this account first (non-ADC)
-  if ! gcloud auth list --filter="status:ACTIVE AND account:$account" --format='value(account)' 2>/dev/null | grep -qx "$account"; then
+  if ! gcloud auth list --filter="account:$account" --format='value(account)' 2>/dev/null | grep -qx "$account"; then
     gcloud auth login "$account" --brief || true
   fi
 
-  # Login writes to well-known ADC; we then copy into context store
-  gcloud auth application-default login --quota-project="$quota"
+  # Activate matching configuration so ADC login inherits the right gcloud project context
+  local gcloud_config
+  gcloud_config="$(json_get "$meta" gcloud_config)"
+  [[ -n "$gcloud_config" ]] || gcloud_config="$name"
+  activate_gcloud_config "$gcloud_config" 2>/dev/null || true
+
+  # Login writes to well-known ADC (this gcloud has no --quota-project on login)
+  gcloud auth application-default login "$account"
+
+  # Set quota project on ADC when the helper exists; always also patch JSON below
+  if gcloud auth application-default set-quota-project --help &>/dev/null; then
+    gcloud auth application-default set-quota-project "$quota" || info "warn: set-quota-project failed; will patch credentials JSON"
+  fi
 
   [[ -f "$GCLOUD_ADC" ]] || die "ADC file not created at $GCLOUD_ADC"
   mkdir -p -m 700 "$(context_dir "$name")"

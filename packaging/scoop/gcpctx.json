@@ -1,0 +1,16 @@
+{
+  "version": "0.3.0",
+  "description": "Safe Google Cloud context manager (requires Git Bash or WSL)",
+  "homepage": "https://github.com/UriBer/gcpctx",
+  "license": "Apache-2.0",
+  "url": "https://github.com/UriBer/gcpctx/releases/download/v0.3.0/gcpctx-0.3.0.zip",
+  "hash": "REPLACE_WITH_RELEASE_SHA256",
+  "bin": "bin\\gcpctx.cmd",
+  "notes": [
+    "gcpctx is a Bash CLI. Install Git for Windows or WSL.",
+    "After install run: bash -lc 'gcpctx shell-setup --bash' or use shell/gcpctx.ps1 from PowerShell."
+  ],
+  "autoupdate": {
+    "url": "https://github.com/UriBer/gcpctx/releases/download/v$version/gcpctx-$version.zip"
+  }
+}

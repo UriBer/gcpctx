@@ -1,0 +1,16 @@
+name: Bug report
+description: Report a functional bug
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Do not paste credential files or secrets.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: gcpctx version
+    validations:
+      required: true

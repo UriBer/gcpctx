@@ -1,13 +1,35 @@
 #!/usr/bin/env bash
 # gcpctx — manage gcloud ADC + project contexts (folder / CLI / env API)
+# Copyright 2026 UriBer. Licensed under Apache-2.0.
 set -eo pipefail
+
+# Resolve package/lib root (symlink-aware)
+_GCPCTX_ROOT=""
+_gcpctx_resolve_root() {
+  local src="${BASH_SOURCE[0]:-$0}"
+  if command -v realpath >/dev/null 2>&1; then
+    src="$(realpath "$src" 2>/dev/null || echo "$src")"
+  fi
+  _GCPCTX_ROOT="$(cd "$(dirname "$src")/.." && pwd)"
+}
+_gcpctx_resolve_root
+
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/validation.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/exports.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/filesystem.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/version.sh"
+
+gcpctx_umask_secure
 
 GCPCTX_HOME="${GCPCTX_HOME:-$HOME/.gcpctx}"
 CONTEXTS_DIR="$GCPCTX_HOME/contexts"
 ACTIVE_FILE="$GCPCTX_HOME/active"
 GCLOUD_ADC="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/application_default_credentials.json"
 MARKER_NAME=".gcpctx"
-VERSION="0.2.1"
 
 usage() {
   cat <<'EOF'
@@ -28,10 +50,14 @@ Usage:
   gcpctx current [--json] [--prompt]
   gcpctx env [--export]
   gcpctx exec [--] <command>...
-  gcpctx doctor [--fix]
-  gcpctx secrets fix        # chmod 700/600 on managed credential store
-  gcpctx bootstrap          # import from existing gcloud configurations
-  gcpctx sync-adc [NAME]    # copy context credentials to well-known ADC path
+  gcpctx protect <name>
+  gcpctx unprotect <name>
+  gcpctx assert [--context NAME] [--project ID] [--account EMAIL]
+  gcpctx completion bash|zsh|powershell
+  gcpctx doctor [--fix] [--json]
+  gcpctx secrets fix
+  gcpctx bootstrap
+  gcpctx sync-adc [NAME]
   gcpctx shell-setup [--zshrc PATH] [--bashrc PATH] [--pwsh-profile PATH]
   gcpctx shell-path [--zsh|--bash|--ps1]
   gcpctx which
@@ -68,31 +94,10 @@ App / API env vars set on activate:
 EOF
 }
 
-die() { echo "gcpctx: $*" >&2; exit 1; }
-info() { echo "gcpctx: $*" >&2; }
-
 # Resolve install root (symlink-aware) for package.json / shell hooks
 package_root() {
-  local src="${BASH_SOURCE[0]:-$0}"
-  local dir
-  if command -v realpath >/dev/null 2>&1; then
-    src="$(realpath "$src" 2>/dev/null || echo "$src")"
-  elif command -v readlink >/dev/null 2>&1; then
-    local cur="$src"
-    while [[ -L "$cur" ]]; do
-      local link
-      link="$(readlink "$cur")"
-      if [[ "$link" == /* ]]; then
-        cur="$link"
-      else
-        cur="$(dirname "$cur")/$link"
-      fi
-    done
-    src="$cur"
-  fi
-  dir="$(cd "$(dirname "$src")/.." && pwd)"
-  if [[ -f "$dir/shell/gcpctx.zsh" || -f "$dir/package.json" ]]; then
-    echo "$dir"
+  if [[ -f "$_GCPCTX_ROOT/package.json" || -f "$_GCPCTX_ROOT/shell/gcpctx.zsh" ]]; then
+    echo "$_GCPCTX_ROOT"
     return 0
   fi
   if [[ -n "${GCPCTX_PACKAGE_ROOT:-}" && -f "${GCPCTX_PACKAGE_ROOT}/shell/gcpctx.zsh" ]]; then
@@ -107,37 +112,25 @@ package_root() {
       return 0
     fi
   fi
-  # Last resort: empty — callers must handle
-  echo "$dir"
+  echo "$_GCPCTX_ROOT"
 }
 
 read_package_version() {
-  local root pkg
-  root="$(package_root)"
-  pkg="$root/package.json"
-  if [[ -f "$pkg" ]]; then
-    python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "$pkg" 2>/dev/null || true
-  fi
+  gcpctx_read_version "$(package_root)"
 }
+
+die() { gcpctx_die "$*"; }
+info() { echo "gcpctx: $*" >&2; }
 
 ensure_dirs() {
-  mkdir -p -m 700 "$GCPCTX_HOME"
-  mkdir -p -m 700 "$CONTEXTS_DIR"
-  mkdir -p -m 700 "$GCPCTX_HOME/tmp"
-  chmod 700 "$GCPCTX_HOME" "$CONTEXTS_DIR" "$GCPCTX_HOME/tmp" 2>/dev/null || true
+  gcpctx_ensure_dir_700 "$GCPCTX_HOME"
+  gcpctx_ensure_dir_700 "$CONTEXTS_DIR"
+  gcpctx_ensure_dir_700 "$GCPCTX_HOME/tmp"
 }
 
-secure_file_600() {
-  local f="$1"
-  [[ -f "$f" ]] || return 0
-  chmod 600 "$f" 2>/dev/null || true
-}
+secure_file_600() { gcpctx_chmod_600 "$1"; }
+secure_dir_700() { gcpctx_ensure_dir_700 "$1"; }
 
-secure_dir_700() {
-  local d="$1"
-  [[ -d "$d" ]] || return 0
-  chmod 700 "$d" 2>/dev/null || true
-}
 
 file_mode_octal() {
   local f="$1"
@@ -241,6 +234,7 @@ context_exists() {
 }
 
 require_context() {
+  gcpctx_validate_context_name "$1"
   context_exists "$1" || die "unknown context '$1' (try: gcpctx list)"
 }
 
@@ -393,17 +387,15 @@ with open(path, "w") as f:
   activate_gcloud_config "$gcloud_config"
   echo "$name" > "$ACTIVE_FILE"
 
-  # Export paths and non-secret ids only — never credential file contents
-  cat <<EOF
-export GCPCTX_NAME=$(printf '%q' "$name")
-export GCPCTX_HOME=$(printf '%q' "$GCPCTX_HOME")
-export GOOGLE_APPLICATION_CREDENTIALS=$(printf '%q' "$creds")
-export GOOGLE_CLOUD_PROJECT=$(printf '%q' "$project")
-export GCLOUD_PROJECT=$(printf '%q' "$project")
-export GOOGLE_CLOUD_QUOTA_PROJECT=$(printf '%q' "$quota")
-export CLOUDSDK_CORE_PROJECT=$(printf '%q' "$project")
-export CLOUDSDK_ACTIVE_CONFIG_NAME=$(printf '%q' "$gcloud_config")
-EOF
+  # Export paths and non-secret ids only — stdout must be ONLY export lines
+  gcpctx_emit_export GCPCTX_NAME "$name"
+  gcpctx_emit_export GCPCTX_HOME "$GCPCTX_HOME"
+  gcpctx_emit_export GOOGLE_APPLICATION_CREDENTIALS "$creds"
+  gcpctx_emit_export GOOGLE_CLOUD_PROJECT "$project"
+  gcpctx_emit_export GCLOUD_PROJECT "$project"
+  gcpctx_emit_export GOOGLE_CLOUD_QUOTA_PROJECT "$quota"
+  gcpctx_emit_export CLOUDSDK_CORE_PROJECT "$project"
+  gcpctx_emit_export CLOUDSDK_ACTIVE_CONFIG_NAME "$gcloud_config"
 }
 
 resolve_project_id() {
@@ -455,15 +447,7 @@ if project not in ids:
 
 print_deactivate_exports() {
   rm -f "$ACTIVE_FILE"
-  cat <<'EOF'
-unset GCPCTX_NAME
-unset GOOGLE_APPLICATION_CREDENTIALS
-unset GOOGLE_CLOUD_PROJECT
-unset GCLOUD_PROJECT
-unset GOOGLE_CLOUD_QUOTA_PROJECT
-unset CLOUDSDK_CORE_PROJECT
-unset CLOUDSDK_ACTIVE_CONFIG_NAME
-EOF
+  gcpctx_emit_deactivate_exports
 }
 
 want_export=false
@@ -490,6 +474,12 @@ cmd_init() {
   [[ -n "$project" ]] || die "need --project"
   [[ -n "$account" ]] || die "need --account"
   [[ -n "$gcloud_config" ]] || gcloud_config="$name"
+  gcpctx_validate_context_name "$name"
+  gcpctx_validate_project_id "$project"
+  gcpctx_validate_account "$account"
+  gcpctx_validate_region "$region"
+  gcpctx_validate_zone "$zone"
+  gcpctx_validate_context_name "$gcloud_config"
 
   local dir meta
   dir="$(context_dir "$name")"
@@ -570,19 +560,29 @@ cmd_login() {
   chmod 600 "$creds"
   secure_file_600 "$GCLOUD_ADC"
 
-  # Force quota project + account annotation in stored credentials
+  # Force quota project on authorized_user ADC only; never print body
   python3 -c '
 import json, sys
 path, quota, account = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
     data = json.load(f)
-data["quota_project_id"] = quota
-if account:
-    data["account"] = account
+ctype = data.get("type") or ""
+if ctype == "authorized_user":
+    if quota:
+        data["quota_project_id"] = quota
+    if account and "account" not in data:
+        data["account"] = account
+elif ctype in ("service_account", "external_account"):
+    # Do not inject unrelated fields into SA / WIF credentials
+    pass
+else:
+    if quota and "quota_project_id" in data:
+        data["quota_project_id"] = quota
 with open(path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 ' "$creds" "$quota" "$account"
+  chmod 600 "$creds"
 
   info "saved credentials → $creds"
   info "activate with: gcpctx use $name"
@@ -615,8 +615,14 @@ cmd_use() {
   done
   [[ -n "$name" ]] || die "usage: gcpctx use <name> [--project PROJECT]"
   require_context "$name"
+  local protected
+  protected="$(json_get "$(context_meta "$name")" protected)"
+  if [[ "$protected" == "true" ]]; then
+    info "WARNING: activating protected context '$name'"
+  fi
   if [[ -n "$project" ]]; then
     project="$(resolve_project_id "$name" "$project")"
+    gcpctx_validate_project_id "$project"
     warn_if_unknown_project "$name" "$project"
   fi
   if $want_export; then
@@ -769,19 +775,146 @@ EOF
 }
 
 cmd_env() {
+  local mode="export"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) mode="json"; shift ;;
+      --export) mode="export"; shift ;;
+      *) die "usage: gcpctx env [--export|--json]" ;;
+    esac
+  done
+  if [[ "$mode" == "json" ]]; then
+    # Prefer values that would be active after current context
+    local name
+    name="$(read_active_name)"
+    if [[ -n "$name" ]]; then
+      # Apply exports into a subshell env for JSON snapshot without printing secrets
+      # shellcheck disable=SC1090
+      eval "$(print_exports "$name")"
+    fi
+    gcpctx_emit_env_json
+    return
+  fi
   local name
   name="$(read_active_name)"
   [[ -n "$name" ]] || die "no active context (gcpctx use <name>)"
-  # Force export style for env command when --export or default printable
   want_export=true
   print_exports "$name"
 }
 
-cmd_exec() {
-  if [[ "${1:-}" == "--" ]]; then
-    shift
+cmd_assert() {
+  local want_ctx="" want_project="" want_account=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --context) want_ctx="$2"; shift 2 ;;
+      --project) want_project="$2"; shift 2 ;;
+      --account) want_account="$2"; shift 2 ;;
+      *) die "usage: gcpctx assert [--context NAME] [--project ID] [--account EMAIL]" ;;
+    esac
+  done
+  [[ -n "$want_ctx$want_project$want_account" ]] || die "assert requires at least one of --context/--project/--account"
+  local name project account meta
+  name="$(read_active_name)"
+  [[ -n "$name" ]] || die "assert failed: no active context"
+  meta="$(context_meta "$name")"
+  project="$(json_get "$meta" project)"
+  account="$(json_get "$meta" account)"
+  local failed=0
+  if [[ -n "$want_ctx" ]]; then
+    gcpctx_validate_context_name "$want_ctx"
+    if [[ "$name" != "$want_ctx" ]]; then
+      echo "gcpctx: assert failed: context='$name' expected='$want_ctx'" >&2
+      failed=1
+    fi
   fi
-  [[ $# -gt 0 ]] || die "usage: gcpctx exec -- <command>..."
+  if [[ -n "$want_project" ]]; then
+    gcpctx_validate_project_id "$want_project"
+    if [[ "$project" != "$want_project" && "${GOOGLE_CLOUD_PROJECT:-}" != "$want_project" ]]; then
+      echo "gcpctx: assert failed: project='$project' expected='$want_project'" >&2
+      failed=1
+    fi
+  fi
+  if [[ -n "$want_account" ]]; then
+    gcpctx_validate_account "$want_account"
+    if [[ "$account" != "$want_account" ]]; then
+      echo "gcpctx: assert failed: account mismatch" >&2
+      failed=1
+    fi
+  fi
+  [[ "$failed" -eq 0 ]] || exit 1
+  echo "gcpctx: assert ok"
+}
+
+cmd_protect() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: gcpctx protect <name>"
+  require_context "$name"
+  json_write_meta "$(context_meta "$name")" protected "true"
+  info "context '$name' marked protected"
+}
+
+cmd_unprotect() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: gcpctx unprotect <name>"
+  require_context "$name"
+  json_write_meta "$(context_meta "$name")" protected "false"
+  info "context '$name' unprotected"
+}
+
+cmd_completion() {
+  local shell="${1:-}"
+  case "$shell" in
+    bash)
+      cat <<'EOF'
+_gcpctx_completions() {
+  local cur="${COMP_WORDS[COMP_CWORD]}"
+  local cmds="init login use project scan projects activate deactivate list current env exec doctor secrets bootstrap sync-adc shell-setup shell-path protect unprotect assert completion which version help"
+  if [[ $COMP_CWORD -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+  fi
+}
+complete -F _gcpctx_completions gcpctx
+EOF
+      ;;
+    zsh)
+      cat <<'EOF'
+#compdef gcpctx
+_gcpctx() {
+  local -a cmds
+  cmds=(init login use project scan projects activate deactivate list current env exec doctor secrets bootstrap sync-adc shell-setup shell-path protect unprotect assert completion which version help)
+  _describe 'command' cmds
+}
+compdef _gcpctx gcpctx
+EOF
+      ;;
+    powershell|ps1)
+      cat <<'EOF'
+Register-ArgumentCompleter -CommandName gcpctx -ScriptBlock {
+  param($wordToComplete)
+  $cmds = @('init','login','use','project','scan','projects','activate','deactivate','list','current','env','exec','doctor','secrets','bootstrap','sync-adc','shell-setup','shell-path','protect','unprotect','assert','completion','which','version','help')
+  $cmds | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+  }
+}
+EOF
+      ;;
+    *) die "usage: gcpctx completion bash|zsh|powershell" ;;
+  esac
+}
+
+cmd_exec() {
+  local require_ctx="" deny_protected=false allow_protected=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --) shift; break ;;
+      --require-context) require_ctx="$2"; shift 2 ;;
+      --deny-protected) deny_protected=true; shift ;;
+      --allow-protected) allow_protected=true; shift ;;
+      -*) die "unknown exec flag: $1" ;;
+      *) break ;;
+    esac
+  done
+  [[ $# -gt 0 ]] || die "usage: gcpctx exec [--require-context NAME] [--deny-protected|--allow-protected] -- <command>..."
   local name project=""
   name="$(read_active_name)"
   if [[ -z "$name" ]]; then
@@ -789,7 +922,26 @@ cmd_exec() {
     project="$(marker_project)"
   fi
   [[ -n "$name" ]] || die "no context (use .gcpctx or gcpctx use)"
-  # Apply env in a subshell
+  if [[ -n "$require_ctx" ]]; then
+    gcpctx_validate_context_name "$require_ctx"
+    [[ "$name" == "$require_ctx" ]] || die "exec require-context failed: active='$name' required='$require_ctx'"
+  fi
+  local protected
+  protected="$(json_get "$(context_meta "$name")" protected)"
+  if [[ "$protected" == "true" ]]; then
+    if $deny_protected; then
+      die "refusing to exec in protected context '$name' (--deny-protected)"
+    fi
+    if ! $allow_protected; then
+      if [[ ! -t 0 ]]; then
+        die "protected context '$name' requires --allow-protected in non-interactive mode"
+      fi
+      info "WARNING: protected context '$name' — type 'yes' to continue"
+      local ans
+      read -r ans
+      [[ "$ans" == "yes" ]] || die "aborted"
+    fi
+  fi
   # shellcheck disable=SC1090
   eval "$(print_exports "$name" "$project")"
   exec "$@"
@@ -1264,10 +1416,7 @@ cmd_shell_setup() {
 }
 
 cmd_version() {
-  local ver
-  ver="$(read_package_version)"
-  [[ -n "$ver" ]] || ver="$VERSION"
-  echo "gcpctx $ver"
+  echo "gcpctx $(gcpctx_read_version "$(package_root)")"
 }
 
 cmd_bootstrap() {
@@ -1409,6 +1558,10 @@ main() {
     current|status) cmd_current ${args[@]+"${args[@]}"} ;;
     env) cmd_env ${args[@]+"${args[@]}"} ;;
     exec) cmd_exec ${args[@]+"${args[@]}"} ;;
+    protect) cmd_protect ${args[@]+"${args[@]}"} ;;
+    unprotect) cmd_unprotect ${args[@]+"${args[@]}"} ;;
+    assert) cmd_assert ${args[@]+"${args[@]}"} ;;
+    completion) cmd_completion ${args[@]+"${args[@]}"} ;;
     doctor) cmd_doctor ${args[@]+"${args[@]}"} ;;
     secrets) cmd_secrets ${args[@]+"${args[@]}"} ;;
     bootstrap) cmd_bootstrap ${args[@]+"${args[@]}"} ;;

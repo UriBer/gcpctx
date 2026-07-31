@@ -1,0 +1,49 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "20"
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y bats shellcheck zip
+      - name: Verify tag matches package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(python3 -c 'import json;print(json.load(open("package.json"))["version"])')
+          test "$TAG" = "$PKG"
+          test "$TAG" = "$(tr -d '[:space:]' < VERSION)"
+      - name: Verify
+        run: |
+          chmod +x bin/gcpctx scripts/*.sh test/helpers/bin/gcloud
+          npm run verify
+      - name: Build artifacts
+        run: bash scripts/build-release-artifacts.sh
+      - name: Attest
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/gcpctx-*.tar.gz
+            dist/gcpctx-*.zip
+      - name: GitHub Release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
+        with:
+          files: |
+            dist/gcpctx-*.tar.gz
+            dist/gcpctx-*.zip
+            dist/checksums.txt
+            dist/sbom.spdx.json
+      - name: npm publish
+        if: ${{ vars.NPM_PUBLISH == 'true' }}
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Deterministic fake gcloud for tests — never touches real cloud.
+set -eo pipefail
+# Strip gcloud global flags
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --configuration|--project|--account|--quiet|--format|--verbosity)
+      shift
+      [[ $# -gt 0 ]] && shift
+      ;;
+    --configuration=*|--project=*|--account=*|--format=*|--verbosity=*|--quiet)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+  version) echo "Google Cloud SDK 999.0.0"; exit 0 ;;
+  config)
+    sub="${1:-}"; shift || true
+    if [[ "$sub" == "configurations" ]]; then
+      action="${1:-}"
+      if [[ "$action" == "list" ]]; then
+        echo '[{"name":"fake","is_active":true,"properties":{"core":{"account":"user@example.com","project":"example-dev-123456"},"compute":{"region":"us-central1","zone":"us-central1-a"}}}]'
+        exit 0
+      fi
+      exit 0
+    fi
+    if [[ "$sub" == "set" || "$sub" == "get-value" ]]; then
+      if [[ "$sub" == "get-value" ]]; then
+        case "${1:-}" in
+          account) echo "user@example.com" ;;
+          project) echo "example-dev-123456" ;;
+          *) echo "" ;;
+        esac
+      fi
+      exit 0
+    fi
+    exit 0
+    ;;
+  auth) exit 0 ;;
+  projects)
+    if [[ "${1:-}" == "list" ]]; then
+      echo '[{"projectId":"example-dev-123456","name":"Example Dev","projectNumber":"1","lifecycleState":"ACTIVE"}]'
+      exit 0
+    fi
+    exit 0
+    ;;
+esac
+exit 0

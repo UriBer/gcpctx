@@ -1,0 +1,7 @@
+{
+  "type": "authorized_user",
+  "client_id": "000000000000-abcdefghijklmnopqrstuvwxyz.apps.googleusercontent.com",
+  "client_secret": "GOCSPX-TESTONLY-NOT-A-REAL-SECRET",
+  "refresh_token": "1//TESTONLY-NOT-A-REAL-REFRESH-TOKEN-VALUE",
+  "quota_project_id": "example-dev-123456"
+}

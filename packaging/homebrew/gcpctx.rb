@@ -2,7 +2,7 @@ class Gcpctx < Formula
   desc "Safe Google Cloud context manager (account, project, ADC, quota)"
   homepage "https://github.com/UriBer/gcpctx"
   url "https://github.com/UriBer/gcpctx/releases/download/v0.3.0/gcpctx-0.3.0.tar.gz"
-  sha256 "REPLACE_WITH_RELEASE_SHA256"
+  sha256 "e4066767aa76c771dc90b679695727e067bea7523f9a847f87f59afc04bbc024"
   license "Apache-2.0"
 
   depends_on "python@3"

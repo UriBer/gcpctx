@@ -10,6 +10,9 @@ permissions:
   contents: read
 jobs:
   analyze:
+    # CodeQL scanning on private repos requires GitHub Advanced Security.
+    # Runs automatically when public, or when ENABLE_CODEQL=true is set.
+    if: ${{ !github.event.repository.private || vars.ENABLE_CODEQL == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0

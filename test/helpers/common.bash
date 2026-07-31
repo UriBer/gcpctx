@@ -9,9 +9,11 @@ setup_isolated_env() {
   export GCPCTX_HOME="$TEST_TMP/gcpctx"
   export CLOUDSDK_CONFIG="$TEST_TMP/gcloud"
   mkdir -p "$HOME" "$GCPCTX_HOME" "$CLOUDSDK_CONFIG" "$TEST_TMP/bin"
+  chmod 700 "$GCPCTX_HOME" 2>/dev/null || true
   # Prefer fake gcloud
   export PATH="$ROOT/test/helpers/bin:$PATH"
   unset GCPCTX_NAME GOOGLE_CLOUD_PROJECT GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_QUOTA_PROJECT CLOUDSDK_CORE_PROJECT CLOUDSDK_ACTIVE_CONFIG_NAME GCLOUD_PROJECT
+  unset GCPCTX_GCLOUD _GCPCTX_GCLOUD_BIN _GCPCTX_GCLOUD_TRUSTED
 }
 
 teardown_isolated_env() {

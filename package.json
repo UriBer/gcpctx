@@ -1,0 +1,44 @@
+{
+  "name": "gcpctx",
+  "version": "0.2.0",
+  "description": "Switch GCP account, project, and Application Default Credentials as one unit",
+  "bin": {
+    "gcpctx": "./bin/gcpctx"
+  },
+  "files": [
+    "bin/",
+    "shell/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "pack:check": "bash scripts/check-no-secrets.sh",
+    "prepublishOnly": "npm run pack:check"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "keywords": [
+    "gcloud",
+    "gcp",
+    "adc",
+    "credentials",
+    "context",
+    "cli"
+  ],
+  "author": "UriBer",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/UriBer/gcpctx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/UriBer/gcpctx/issues"
+  },
+  "homepage": "https://github.com/UriBer/gcpctx#readme",
+  "preferGlobal": true
+}

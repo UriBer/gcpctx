@@ -2,153 +2,120 @@
 
 Switch Google Cloud **account + project + Application Default Credentials (ADC)** as one unit — so CLI tools, client libraries, and scripts stop creating resources in the wrong project or burning quota on the wrong billing/quota project.
 
+## Install (npm)
+
+```bash
+npm install -g gcpctx
+gcpctx shell-setup
+exec zsh
+gcpctx bootstrap
+gcpctx doctor
+```
+
+Requires: `bash`, `python3`, [`gcloud`](https://cloud.google.com/sdk) CLI. Supported on macOS / Linux / WSL.
+
+Fallback from a clone:
+
+```bash
+./install.sh
+```
+
 ## Why
 
 `gcloud config configurations activate` only affects the `gcloud` CLI.  
-ADC (`~/.config/gcloud/application_default_credentials.json`) is **global** and is what Python/Node/Go/Terraform/etc. use. Mixing them causes:
+ADC (`~/.config/gcloud/application_default_credentials.json`) is **global** and is what Python/Node/Go/Terraform/etc. use. Mixing them causes wrong-project creates and quota errors.
 
-- objects created in the wrong project
-- quota / API enablement errors on the wrong project
-- silent auth as the wrong user
-
-`gcpctx` keeps a credentials file **per context** and activates them together with env vars Google SDKs already understand.
+`gcpctx` keeps a credentials file **per context** and activates them with env vars Google SDKs already understand.
 
 ## Three surfaces
 
 | Surface | How |
 |---------|-----|
 | **Folder** (like `.venv`) | Put `.gcpctx` in a repo → zsh cd-hook auto-activates |
-| **Command** (like `npm`) | `gcpctx use dev` / `gcpctx exec -- …` |
+| **Command** (like `npm`) | `gcpctx use prod` / `gcpctx exec -- …` |
 | **API / apps** | Standard env vars + `gcpctx current --json` |
-
-## Install
-
-```bash
-./install.sh
-exec zsh
-gcpctx bootstrap
-gcpctx login dev    # browser login per account that needs ADC
-gcpctx use prod
-gcpctx doctor
-```
-
-Installs `~/bin/gcpctx` and wires `shell/gcpctx.zsh` into `~/.zshrc`.
 
 ## Quick start
 
 ```bash
-# Import your existing gcloud configurations (dev/prod/…)
 gcpctx bootstrap
-
-# Login ADC into a context (once per account)
 gcpctx login prod
 gcpctx login dev
 
-# Switch (zsh wrapper auto-evals env)
 gcpctx use prod
-gcpctx scan                 # discover projects for that account
-gcpctx projects             # list cached projects
+gcpctx scan
+gcpctx projects
 gcpctx use prod --project other-project
-# or keep context and only change project:
 gcpctx project other-project
-gcpctx current
-gcpctx doctor
 
-# Folder-based: in an app repo
-echo '{"name":"prod","project":"dgt-gcp-moe-dlk-data-prod"}' > .gcpctx
-# cd away and back → auto-activate context + project
-
-# Run one command in context (scripts/CI)
-gcpctx use prod
-gcpctx exec -- gcloud projects describe "$(gcpctx current --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["project"])')"
+echo '{"name":"prod","project":"my-gcp-project"}' > .gcpctx
 ```
 
 ## App / API env vars
 
-On activate, these are set (and well-known ADC is synced):
+On activate (paths and ids only — **never** token contents):
 
 | Variable | Purpose |
 |----------|---------|
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to this context's ADC JSON |
 | `GOOGLE_CLOUD_PROJECT` | Default project for SDKs |
-| `GOOGLE_CLOUD_QUOTA_PROJECT` | Quota / billing project for ADC |
+| `GOOGLE_CLOUD_QUOTA_PROJECT` | Quota project for ADC |
 | `CLOUDSDK_CORE_PROJECT` | gcloud project |
 | `CLOUDSDK_ACTIVE_CONFIG_NAME` | Named gcloud configuration |
 | `GCPCTX_NAME` | Active context name |
 
-Machine-readable:
-
 ```bash
 gcpctx current --json
+# includes credentials_path + credentials_present — not refresh_token / client_secret
 ```
 
-```json
-{
-  "active": true,
-  "name": "prod",
-  "account": "you@example.com",
-  "project": "my-project",
-  "quota_project": "my-project",
-  "gcloud_config": "prod",
-  "credentials_path": "/Users/you/.gcpctx/contexts/prod/credentials.json",
-  "credentials_present": true,
-  "projects_scanned": 12,
-  "projects_scanned_at": "2026-07-31T06:00:00Z"
-}
+## Security
+
+**Invariant:** refresh tokens, client secrets, and credential JSON bodies never leave the machine via npm pack, CLI stdout/stderr, `--json`, or `--export`.
+
+| Control | Behavior |
+|---------|----------|
+| Local store | `~/.gcpctx` mode `700`; `credentials.json` mode `600` |
+| Export / JSON | Paths and project metadata only |
+| Doctor | Permission checks; never dumps ADC JSON |
+| Repair | `gcpctx secrets fix` or `gcpctx doctor --fix` |
+| Publish | `npm run pack:check` blocks secret patterns in the tarball |
+
+Do **not** `cat` credential files into issues or chat logs.
+
+```bash
+gcpctx secrets fix
+gcpctx doctor
 ```
 
 ## Layout
 
 ```
-~/.gcpctx/
-  active
-  contexts/
-    <name>/
-      meta.json           # account, active project, quota, region, gcloud_config
-      credentials.json    # ADC for this context/account (never commit)
-      projects.json       # cached scan of projects this account can access
+~/.gcpctx/                    # mode 700
+  contexts/<name>/            # mode 700
+    meta.json
+    credentials.json          # mode 600 — never commit
+    projects.json
+  tmp/                        # private scan temp
 
-<repo>/.gcpctx            # {"name":"prod","project":"my-gcp-project"}  — safe to commit
+<repo>/.gcpctx                # {"name":"prod","project":"…"} — safe to commit
 ```
-
-A **context** is an account/env (credentials). A **project** is selected inside that context after `gcpctx scan`.
 
 ## Commands
 
 ```
-gcpctx init [--name --project --account --region --zone]
-gcpctx login [NAME]
-gcpctx use <name> [--project PROJECT]
-gcpctx project <project-id>      # switch project in active context
-gcpctx project set <project-id>
-gcpctx scan [NAME] [--json]      # discover projects for context account
-gcpctx projects [NAME] [--json] [--refresh]
-gcpctx activate          # from nearest .gcpctx (honors project field)
-gcpctx deactivate
-gcpctx list
-gcpctx current [--json|--prompt]
-gcpctx env [--export]
-gcpctx exec -- <cmd>...
-gcpctx doctor
-gcpctx bootstrap
-gcpctx sync-adc [NAME]
-gcpctx which
-gcpctx version
+gcpctx init | login | use | project | scan | projects
+gcpctx activate | deactivate | list | current | env | exec
+gcpctx doctor [--fix] | secrets fix
+gcpctx bootstrap | sync-adc | shell-setup | shell-path | which | version
 ```
 
-Without the zsh wrapper, export env explicitly:
+Without the zsh wrapper:
 
 ```bash
-eval "$(gcpctx use dev --export)"
+eval "$(gcpctx use prod --export)"
 ```
-
-## Safety
-
-- One ADC file per context/account (no shared global login across accounts)
-- Quota project always aligned to the **selected** project on login/activate/project switch
-- `gcpctx doctor` fails if gcloud project, env project, and ADC `quota_project_id` disagree
-- `gcpctx scan` caches projects per context so `use`/`project` can resolve IDs (and warn if unknown)
 
 ## License
 
-Private — all rights reserved.
+UNLICENSED — all rights reserved. Install via npm for use; source remains private unless otherwise stated.

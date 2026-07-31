@@ -485,7 +485,7 @@ cmd_init() {
   dir="$(context_dir "$name")"
   meta="$(context_meta "$name")"
   ensure_dirs
-  mkdir -p -m 700 "$dir"
+  mkdir -p "$dir"
   chmod 700 "$dir" 2>/dev/null || true
   json_write_meta "$meta" \
     name "$name" \
@@ -554,7 +554,7 @@ cmd_login() {
   fi
 
   [[ -f "$GCLOUD_ADC" ]] || die "ADC file not created at $GCLOUD_ADC"
-  mkdir -p -m 700 "$(context_dir "$name")"
+  mkdir -p "$(context_dir "$name")"
   chmod 700 "$(context_dir "$name")" 2>/dev/null || true
   cp "$GCLOUD_ADC" "$creds"
   chmod 600 "$creds"
@@ -1274,7 +1274,7 @@ cmd_secrets_fix() {
   info "hardening permissions under $GCPCTX_HOME"
   chmod 700 "$GCPCTX_HOME" 2>/dev/null || true
   chmod 700 "$CONTEXTS_DIR" 2>/dev/null || true
-  mkdir -p -m 700 "$GCPCTX_HOME/tmp"
+  mkdir -p "$GCPCTX_HOME/tmp"
   chmod 700 "$GCPCTX_HOME/tmp" 2>/dev/null || true
   local d cred
   shopt -s nullglob

@@ -4,30 +4,152 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>gcpctx — Stop deploying to the wrong GCP project</title>
+  <meta name="description" content="Switch Google Cloud account, project, gcloud config, ADC, and quota project as one safe context." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
-    :root { --bg:#0b1220; --fg:#e8eef7; --muted:#9db0c9; --acc:#3dd6c6; }
-    body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--fg); }
-    main { max-width: 880px; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
-    h1 { font-size: clamp(2rem, 5vw, 3rem); line-height:1.1; }
-    .lead { color: var(--muted); font-size:1.15rem; }
-    pre { background:#121a2b; padding:1rem; overflow:auto; border-radius:8px; }
-    a { color: var(--acc); }
-    .cta { display:inline-block; margin-top:1rem; padding:.7rem 1rem; background:var(--acc); color:#042; text-decoration:none; border-radius:6px; font-weight:600; }
+    :root {
+      --ink: #14201a;
+      --paper: #f3efe6;
+      --leaf: #1f6b4a;
+      --leaf-deep: #0f3d2c;
+      --sand: #e4dccb;
+      --glow: #c8f27a;
+      --muted: #5a6a60;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      font-family: "IBM Plex Sans", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #d9f2c4 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #cfe8dc 0%, transparent 50%),
+        linear-gradient(180deg, var(--paper), #ebe4d6 70%, #e7dfcf);
+    }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    .brand {
+      font-family: "Fraunces", Georgia, serif;
+      font-size: clamp(2.6rem, 7vw, 4.4rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 0.95;
+      margin: 0 0 1rem;
+      animation: rise 0.7s ease-out both;
+    }
+    .brand span { color: var(--leaf); }
+    .headline {
+      font-family: "Fraunces", Georgia, serif;
+      font-size: clamp(1.35rem, 3vw, 1.85rem);
+      font-weight: 600;
+      max-width: 18ch;
+      margin: 0 0 0.75rem;
+      animation: rise 0.7s ease-out 0.08s both;
+    }
+    .lead {
+      color: var(--muted);
+      font-size: 1.08rem;
+      max-width: 42rem;
+      margin: 0 0 1.5rem;
+      animation: rise 0.7s ease-out 0.16s both;
+    }
+    .ctas {
+      display: flex; flex-wrap: wrap; gap: 0.75rem;
+      margin-bottom: 2rem;
+      animation: rise 0.7s ease-out 0.24s both;
+    }
+    .cta {
+      display: inline-flex; align-items: center;
+      padding: 0.75rem 1.05rem;
+      background: var(--leaf);
+      color: #f7fff6;
+      text-decoration: none;
+      font-weight: 600;
+      border: 2px solid var(--leaf-deep);
+      box-shadow: 4px 4px 0 var(--leaf-deep);
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .cta:hover { transform: translate(-1px, -1px); box-shadow: 5px 5px 0 var(--leaf-deep); }
+    .cta.secondary { background: transparent; color: var(--ink); }
+    pre {
+      margin: 0;
+      padding: 1.1rem 1.15rem;
+      background: var(--leaf-deep);
+      color: #e8f7ee;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.92rem;
+      line-height: 1.45;
+      overflow: auto;
+      border: 2px solid #081f16;
+      box-shadow: 6px 6px 0 #081f16;
+      animation: rise 0.7s ease-out 0.32s both;
+    }
+    section { margin-top: 2.75rem; }
+    h2 {
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 1.45rem;
+      margin: 0 0 0.5rem;
+    }
+    p { color: var(--muted); max-width: 40rem; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .grid div {
+      background: rgba(255,255,255,0.45);
+      border: 1px solid var(--sand);
+      padding: 0.9rem 1rem;
+    }
+    .grid strong { display: block; color: var(--ink); margin-bottom: 0.25rem; }
+    footer { margin-top: 3rem; color: var(--muted); font-size: 0.92rem; }
+    footer a { color: var(--leaf-deep); }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; transition: none !important; }
+    }
   </style>
 </head>
 <body>
-<main>
-  <h1>Stop deploying to the wrong GCP project</h1>
-  <p class="lead">gcpctx switches account, project, gcloud config, ADC and quota project as one safe context.</p>
-  <pre><code>npm install -g gcpctx
+  <div class="wrap">
+    <p class="brand">gcp<span>ctx</span></p>
+    <h1 class="headline">Stop deploying to the wrong GCP project</h1>
+    <p class="lead">Switch account, project, gcloud config, Application Default Credentials, and quota project as one safe context — with a venv-style prompt and guards for agents.</p>
+    <div class="ctas">
+      <a class="cta" href="https://www.npmjs.com/package/gcpctx">Install from npm</a>
+      <a class="cta secondary" href="https://github.com/UriBer/gcpctx">GitHub</a>
+    </div>
+    <pre><code>npm install -g gcpctx
 gcpctx shell-setup
 gcpctx use prod
-gcpctx assert --project my-prod</code></pre>
-  <a class="cta" href="https://github.com/UriBer/gcpctx">View on GitHub</a>
-  <h2>Why gcloud config is not enough</h2>
-  <p>Client libraries use Application Default Credentials — a separate global file. gcpctx keeps CLI + ADC aligned.</p>
-  <h2>Security</h2>
-  <p>No telemetry. Credential bodies never printed. See SECURITY.md.</p>
-</main>
+# prompt → (gcp:prod:your-project)
+gcpctx assert --project your-project</code></pre>
+
+    <section>
+      <h2>Why gcloud config is not enough</h2>
+      <p>Client libraries, Terraform providers, and many AI coding agents read Application Default Credentials — a separate global file. gcpctx keeps CLI + ADC aligned.</p>
+      <div class="grid">
+        <div><strong>Aligned ADC</strong><span>Per-context credentials + quota project</span></div>
+        <div><strong>Prompt</strong><span>(gcp:context:project) in zsh/bash/pwsh</span></div>
+        <div><strong>Agent-safe</strong><span>assert / exec --require-context</span></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Security posture</h2>
+      <p>No telemetry. Credential bodies never printed. Allowlisted shell exports. Apache-2.0.</p>
+    </section>
+
+    <footer>
+      <a href="https://github.com/UriBer/gcpctx">github.com/UriBer/gcpctx</a>
+      · <a href="https://www.npmjs.com/package/gcpctx">npmjs.com/package/gcpctx</a>
+      · <a href="https://github.com/UriBer/gcpctx/blob/main/SECURITY.md">SECURITY.md</a>
+    </footer>
+  </div>
 </body>
 </html>

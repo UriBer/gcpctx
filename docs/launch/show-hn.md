@@ -1,7 +1,26 @@
 # Show HN: gcpctx – stop deploying to the wrong GCP project
 
-gcloud configurations don't switch Application Default Credentials. SDKs and Terraform often use ADC, so you can be in "project A" in gcloud and still mutate project B.
+## Title
+Show HN: gcpctx – stop deploying to the wrong GCP project
 
-gcpctx switches account, project, gcloud config, ADC, and quota project together, with a venv-style prompt and assert/exec guards for agents and CI.
+## URL
+https://github.com/UriBer/gcpctx
 
-Apache-2.0 · https://github.com/UriBer/gcpctx
+## Text (optional body)
+
+gcloud configurations don't switch Application Default Credentials. SDKs, Terraform providers, and many AI coding agents use ADC — a separate global file — so you can be "in project A" on the CLI and still mutate project B.
+
+gcpctx switches account, project, gcloud config, ADC, and quota project together:
+
+```
+npm install -g gcpctx
+gcpctx shell-setup
+gcpctx use prod
+# prompt → (gcp:prod:your-project)
+gcpctx assert --project your-project
+```
+
+Also: repo `.gcpctx` markers (like `.venv`), protect/assert/exec guards for agents, Apache-2.0.
+
+https://www.npmjs.com/package/gcpctx  
+https://github.com/UriBer/gcpctx

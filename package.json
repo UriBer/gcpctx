@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "description": "Safe Google Cloud context manager: account, project, ADC, and quota as one unit",
   "bin": {
-    "gcpctx": "./bin/gcpctx"
+    "gcpctx": "bin/gcpctx"
   },
   "files": [
     "bin/",

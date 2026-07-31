@@ -35,8 +35,8 @@ gcpctx shell-setup
 ./install.sh
 ```
 
-Homebrew (after tap publish): `brew install UriBer/tap/gcpctx`  
-Scoop: see `packaging/scoop/`  
+Homebrew: `brew tap UriBer/tap && brew install gcpctx`  
+Scoop: `scoop bucket add gcpctx https://github.com/UriBer/scoop-gcpctx && scoop install gcpctx`  
 WinGet: not offered yet — see `packaging/winget/README.md`
 
 ## Safety model

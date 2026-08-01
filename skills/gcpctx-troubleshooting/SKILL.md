@@ -1,7 +1,6 @@
 ---
-description: Troubleshoot gcpctx issues and fix credential problems
-category: google-cloud
-tags: [gcp, troubleshooting, debugging, credentials]
+name: gcpctx-troubleshooting
+description: Troubleshoot gcpctx issues and fix credential problems. Use when gcpctx fails, ADC is missing, permissions are wrong, or gcloud uses the wrong project.
 ---
 
 # gcpctx: Troubleshooting

@@ -1,7 +1,6 @@
 ---
-description: Set up gcpctx in CI/CD pipelines and automate GCP context management
-category: google-cloud
-tags: [gcp, cicd, automation, github-actions, gitlab-ci]
+name: gcpctx-cicd
+description: Set up gcpctx in CI/CD pipelines and automate GCP context management. Use for GitHub Actions, GitLab CI, multi-environment deploys, and service-account auth.
 ---
 
 # gcpctx: CI/CD Integration

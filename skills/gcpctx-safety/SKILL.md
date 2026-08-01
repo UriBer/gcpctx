@@ -1,7 +1,6 @@
 ---
-description: Safely manage GCP production environments with gcpctx protection and assertions
-category: google-cloud
-tags: [gcp, security, production, safety, devops]
+name: gcpctx-safety
+description: Safely manage GCP production environments with gcpctx protection and assertions. Use when preventing production accidents, adding fail-fast checks, or protecting sensitive contexts.
 ---
 
 # gcpctx: Production Safety

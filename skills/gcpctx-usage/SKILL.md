@@ -1,7 +1,6 @@
 ---
-description: Initialize and switch between GCP contexts using gcpctx
-category: google-cloud
-tags: [gcp, credentials, context-switching, devops]
+name: gcpctx-usage
+description: Initialize and switch between GCP contexts using gcpctx. Use when managing GCP accounts, projects, ADC credentials, or switching between cloud environments.
 ---
 
 # gcpctx: GCP Context Management

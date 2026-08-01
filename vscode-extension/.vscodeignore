@@ -1,0 +1,14 @@
+**/.git
+**/.DS_Store
+**/node_modules
+**/*.vsix
+src/**
+tsconfig.json
+.vscode-test/**
+.vscode-test-web/**
+.gitignore
+.vscode/**
+.eslintrc.json
+**/*.map
+**/*.ts
+BUILD.md

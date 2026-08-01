@@ -1,0 +1,27 @@
+{
+  "name": "gcpctx-demo-app",
+  "version": "1.0.0",
+  "description": "Demo application showing gcpctx usage with Google Cloud Storage",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "upload": "node upload.js",
+    "test": "node test.js"
+  },
+  "keywords": [
+    "gcpctx",
+    "gcp",
+    "google-cloud",
+    "demo",
+    "context-switching"
+  ],
+  "author": "UriBer",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@google-cloud/storage": "^7.0.0",
+    "dotenv": "^16.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

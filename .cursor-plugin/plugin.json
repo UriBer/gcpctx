@@ -1,0 +1,27 @@
+{
+  "name": "gcpctx",
+  "displayName": "gcpctx - GCP Context Manager",
+  "version": "1.0.0",
+  "author": "UriBer",
+  "description": "AI agent skills for managing Google Cloud Platform contexts, projects, and credentials with gcpctx CLI tool",
+  "license": "Apache-2.0",
+  "keywords": [
+    "google-cloud",
+    "gcp",
+    "context-switching",
+    "credentials",
+    "devops",
+    "cloud",
+    "terraform",
+    "security"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/UriBer/gcpctx.git"
+  },
+  "logo": "assets/logo.svg",
+  "primaryColor": "#4285F4",
+  "skills": "skills/",
+  "homepage": "https://github.com/UriBer/gcpctx",
+  "bugs": "https://github.com/UriBer/gcpctx/issues"
+}

@@ -72,6 +72,21 @@ Repo marker (safe to commit):
 | Windows | npm install; run via **Git Bash** or **WSL**; PowerShell wrapper available |
 | Windows CMD | Unsupported |
 
+## AI agent skills
+
+Teach Cursor, Claude Code, and other agents how to use gcpctx safely:
+
+```bash
+# Install skills (Cursor, Claude Code, Codex, etc.)
+npx skills add UriBer/gcpctx
+
+# Or import in Cursor: Customize → Plugins → Import marketplace
+# https://github.com/UriBer/gcpctx
+```
+
+Skills included: `gcpctx-usage`, `gcpctx-safety`, `gcpctx-troubleshooting`, `gcpctx-cicd`.  
+See [SKILLS_README.md](SKILLS_README.md).
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE)

@@ -1,0 +1,33 @@
+{
+  "name": "gcpctx-skills",
+  "owner": {
+    "name": "UriBer"
+  },
+  "metadata": {
+    "description": "Official AI agent skills for gcpctx — GCP context management"
+  },
+  "plugins": [
+    {
+      "name": "gcpctx",
+      "source": ".",
+      "description": "AI agent skills for managing Google Cloud Platform contexts, projects, and credentials",
+      "version": "1.0.0",
+      "author": {
+        "name": "UriBer"
+      },
+      "homepage": "https://github.com/UriBer/gcpctx",
+      "repository": "https://github.com/UriBer/gcpctx",
+      "license": "Apache-2.0",
+      "keywords": [
+        "google-cloud",
+        "gcp",
+        "context-switching",
+        "credentials",
+        "devops"
+      ],
+      "logo": "assets/logo.svg",
+      "category": "developer-tools",
+      "skills": "skills/"
+    }
+  ]
+}

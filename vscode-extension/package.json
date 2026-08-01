@@ -1,0 +1,85 @@
+{
+  "name": "gcpctx-skills",
+  "displayName": "gcpctx Skills for AI Assistants",
+  "description": "AI agent skills for managing Google Cloud Platform contexts, projects, and credentials with gcpctx CLI",
+  "version": "1.0.0",
+  "publisher": "uriber",
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "gcp",
+    "google-cloud",
+    "ai-skills",
+    "copilot",
+    "agent-skills",
+    "gcpctx",
+    "cloud",
+    "credentials",
+    "adc"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "gcpctx.showSkills",
+        "title": "gcpctx: Show Available Skills",
+        "category": "gcpctx"
+      },
+      {
+        "command": "gcpctx.openDocs",
+        "title": "gcpctx: Open Documentation",
+        "category": "gcpctx"
+      }
+    ],
+    "chatSkills": [
+      {
+        "name": "gcpctx-usage",
+        "path": "skills/gcpctx-usage"
+      },
+      {
+        "name": "gcpctx-safety",
+        "path": "skills/gcpctx-safety"
+      },
+      {
+        "name": "gcpctx-troubleshooting",
+        "path": "skills/gcpctx-troubleshooting"
+      },
+      {
+        "name": "gcpctx-cicd",
+        "path": "skills/gcpctx-cicd"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/UriBer/gcpctx"
+  },
+  "bugs": {
+    "url": "https://github.com/UriBer/gcpctx/issues"
+  },
+  "homepage": "https://github.com/UriBer/gcpctx#readme",
+  "license": "Apache-2.0",
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^2.24.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -72,15 +72,20 @@ This extension works with:
 
 ## Installation
 
-### From VSCode Marketplace
-1. Open VSCode
+### From Visual Studio Marketplace
+1. Open VS Code
 2. Go to Extensions (Ctrl+Shift+X / Cmd+Shift+X)
 3. Search for "gcpctx Skills"
 4. Click Install
 
+Or install directly from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=di2ops.gcpctx-skills).
+
+### From Open VSX
+For Cursor, VSCodium, and other Open VSX clients, install from [Open VSX: di2ops/gcpctx-skills](https://open-vsx.org/extension/di2ops/gcpctx-skills).
+
 ### From VSIX
 1. Download the `.vsix` file from [releases](https://github.com/UriBer/gcpctx/releases)
-2. Open VSCode
+2. Open VS Code
 3. Go to Extensions (Ctrl+Shift+X / Cmd+Shift+X)
 4. Click "..." menu → "Install from VSIX..."
 5. Select the downloaded file
@@ -105,6 +110,9 @@ Apache-2.0 - see [LICENSE](https://github.com/UriBer/gcpctx/blob/main/LICENSE)
 
 ## Links
 
+- [Product page (DI2Ops)](https://www.di2ops.com/products/gcpctx)
+- [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=di2ops.gcpctx-skills)
+- [Open VSX](https://open-vsx.org/extension/di2ops/gcpctx-skills)
 - [gcpctx GitHub Repository](https://github.com/UriBer/gcpctx)
 - [gcpctx npm Package](https://www.npmjs.com/package/gcpctx)
 - [Documentation](https://uriber.github.io/gcpctx/)

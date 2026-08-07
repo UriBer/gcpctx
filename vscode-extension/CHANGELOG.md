@@ -2,6 +2,13 @@
 
 All notable changes to the "gcpctx-skills" extension will be documented in this file.
 
+## [1.0.1] - 2026-08-04
+
+### Changed
+- Document Open VSX and Visual Studio Marketplace install paths in Overview
+- Point homepage to https://www.di2ops.com/products/gcpctx
+- Align publisher id with marketplace listing (`di2ops`)
+
 ## [1.0.0] - 2026-08-01
 
 ### Added

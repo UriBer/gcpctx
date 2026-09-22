@@ -26,6 +26,16 @@ source "$_GCPCTX_ROOT/lib/version.sh"
 source "$_GCPCTX_ROOT/lib/gcloud.sh"
 # shellcheck source=/dev/null
 source "$_GCPCTX_ROOT/lib/doctor.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/config.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/history.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/classify.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/bq.sh"
+# shellcheck source=/dev/null
+source "$_GCPCTX_ROOT/lib/finops.sh"
 
 gcpctx_umask_secure
 
@@ -53,7 +63,14 @@ Usage:
   gcpctx list
   gcpctx current [--json] [--prompt]
   gcpctx env [--export]
-  gcpctx exec [--] <command>...
+  gcpctx exec [--dry-run] [--snapshot] [--undo-cmd CMD] [--] <command>...
+  gcpctx history [--json] [--limit N] [--context NAME] [--project ID]
+  gcpctx history show <id>
+  gcpctx history snapshots [--json] [--project ID]
+  gcpctx timeline [--json] [--limit N]
+  gcpctx snapshots [--json] [--project ID]
+  gcpctx replay <id> [--context NAME] [--project ID] [--dry-run]
+  gcpctx undo [<id>] [--dry-run] [--install-finops]
   gcpctx protect <name>
   gcpctx unprotect <name>
   gcpctx assert [--context NAME] [--project ID] [--account EMAIL]
@@ -76,6 +93,17 @@ access; then switch projects inside the context without re-login:
   gcpctx projects
   gcpctx use prod --project other-gcp-project
   gcpctx project yet-another-project
+
+History (on by default; set history.enabled=false in config.json or
+GCPCTX_HISTORY=0 to disable). Commands are journaled with PII (account,
+project, argv) — never credential bodies. Undo restores local context and
+classified cloud mutations; BQ deletes use snapshot tables + time travel.
+
+  gcpctx history
+  gcpctx snapshots
+  gcpctx undo
+  gcpctx exec --dry-run -- bq query --use_legacy_sql=false 'SELECT 1'
+  gcpctx replay <id> --project other-project
 
 Shell activation (required for env in your interactive shell):
   eval "$(gcpctx use dev --export)"
@@ -130,6 +158,10 @@ ensure_dirs() {
   gcpctx_ensure_dir_700 "$GCPCTX_HOME"
   gcpctx_ensure_dir_700 "$CONTEXTS_DIR"
   gcpctx_ensure_dir_700 "$GCPCTX_HOME/tmp"
+  gcpctx_config_ensure
+  if gcpctx_history_enabled; then
+    gcpctx_history_ensure
+  fi
 }
 
 secure_file_600() { gcpctx_chmod_600 "$1"; }
@@ -873,7 +905,7 @@ cmd_completion() {
       cat <<'EOF'
 _gcpctx_completions() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
-  local cmds="init login use project scan projects activate deactivate list current env exec doctor secrets bootstrap sync-adc shell-setup shell-path protect unprotect assert completion which version help"
+  local cmds="init login use project scan projects activate deactivate list current env exec history timeline snapshots replay undo doctor secrets bootstrap sync-adc shell-setup shell-path protect unprotect assert completion which version help"
   if [[ $COMP_CWORD -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
   fi
@@ -886,7 +918,7 @@ EOF
 #compdef gcpctx
 _gcpctx() {
   local -a cmds
-  cmds=(init login use project scan projects activate deactivate list current env exec doctor secrets bootstrap sync-adc shell-setup shell-path protect unprotect assert completion which version help)
+  cmds=(init login use project scan projects activate deactivate list current env exec history timeline snapshots replay undo doctor secrets bootstrap sync-adc shell-setup shell-path protect unprotect assert completion which version help)
   _describe 'command' cmds
 }
 compdef _gcpctx gcpctx
@@ -896,7 +928,7 @@ EOF
       cat <<'EOF'
 Register-ArgumentCompleter -CommandName gcpctx -ScriptBlock {
   param($wordToComplete)
-  $cmds = @('init','login','use','project','scan','projects','activate','deactivate','list','current','env','exec','doctor','secrets','bootstrap','sync-adc','shell-setup','shell-path','protect','unprotect','assert','completion','which','version','help')
+  $cmds = @('init','login','use','project','scan','projects','activate','deactivate','list','current','env','exec','history','timeline','snapshots','replay','undo','doctor','secrets','bootstrap','sync-adc','shell-setup','shell-path','protect','unprotect','assert','completion','which','version','help')
   $cmds | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
     [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
   }
@@ -907,19 +939,46 @@ EOF
   esac
 }
 
+# Shared protected-context gate for exec/undo/replay.
+_gcpctx_gate_protected() {
+  local name="$1" deny_protected="$2" allow_protected="$3"
+  local protected
+  protected="$(json_get "$(context_meta "$name")" protected)"
+  if [[ "$protected" == "true" ]]; then
+    if [[ "$deny_protected" == "true" ]]; then
+      die "refusing to run in protected context '$name' (--deny-protected)"
+    fi
+    if [[ "$allow_protected" != "true" ]]; then
+      if [[ ! -t 0 ]]; then
+        die "protected context '$name' requires --allow-protected in non-interactive mode"
+      fi
+      info "WARNING: protected context '$name' — type 'yes' to continue"
+      local ans
+      read -r ans
+      [[ "$ans" == "yes" ]] || die "aborted"
+    fi
+  fi
+}
+
 cmd_exec() {
   local require_ctx="" deny_protected=false allow_protected=false
+  local dry_run=false want_snapshot=false undo_cmd="" install_finops=false
+  ensure_dirs
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --) shift; break ;;
       --require-context) require_ctx="$2"; shift 2 ;;
       --deny-protected) deny_protected=true; shift ;;
       --allow-protected) allow_protected=true; shift ;;
+      --dry-run) dry_run=true; shift ;;
+      --snapshot) want_snapshot=true; shift ;;
+      --undo-cmd) undo_cmd="$2"; shift 2 ;;
+      --install-finops) install_finops=true; shift ;;
       -*) die "unknown exec flag: $1" ;;
       *) break ;;
     esac
   done
-  [[ $# -gt 0 ]] || die "usage: gcpctx exec [--require-context NAME] [--deny-protected|--allow-protected] -- <command>..."
+  [[ $# -gt 0 ]] || die "usage: gcpctx exec [--dry-run] [--snapshot] [--undo-cmd CMD] [--require-context NAME] [--deny-protected|--allow-protected] -- <command>..."
   local name project=""
   name="$(read_active_name)"
   if [[ -z "$name" ]]; then
@@ -931,25 +990,554 @@ cmd_exec() {
     gcpctx_validate_context_name "$require_ctx"
     [[ "$name" == "$require_ctx" ]] || die "exec require-context failed: active='$name' required='$require_ctx'"
   fi
-  local protected
-  protected="$(json_get "$(context_meta "$name")" protected)"
-  if [[ "$protected" == "true" ]]; then
-    if $deny_protected; then
-      die "refusing to exec in protected context '$name' (--deny-protected)"
-    fi
-    if ! $allow_protected; then
-      if [[ ! -t 0 ]]; then
-        die "protected context '$name' requires --allow-protected in non-interactive mode"
-      fi
-      info "WARNING: protected context '$name' — type 'yes' to continue"
-      local ans
-      read -r ans
-      [[ "$ans" == "yes" ]] || die "aborted"
-    fi
-  fi
+  _gcpctx_gate_protected "$name" "$deny_protected" "$allow_protected"
+
+  local classification class_json
+  class_json="$(gcpctx_classify_argv "$@")"
+  info "classified: $(gcpctx_classify_summary "$class_json")"
+
   # shellcheck disable=SC1090
   eval "$(print_exports "$name" "$project")"
-  exec "$@"
+
+  local eid="" before_dir=""
+  local family action resource
+  family="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["family"])' <<<"$class_json")"
+  action="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["action"])' <<<"$class_json")"
+  resource="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("resource") or "")' <<<"$class_json")"
+  local ctx_project
+  ctx_project="$(json_get "$(context_meta "$name")" project)"
+
+  if gcpctx_history_enabled; then
+    eid="$(gcpctx_history_begin)"
+    before_dir="$(gcpctx_history_entry_dir "$eid")/before"
+    gcpctx_history_snapshot_local "$eid" "$name"
+    # Terraform state snapshot
+    if [[ "$family" == "terraform" ]]; then
+      local state_path="terraform.tfstate"
+      local custom_state
+      custom_state="$(python3 -c 'import json,sys; print((json.load(sys.stdin).get("details") or {}).get("state") or "")' <<<"$class_json")"
+      [[ -n "$custom_state" ]] && state_path="$custom_state"
+      if [[ -f "$state_path" ]]; then
+        cp "$state_path" "$before_dir/terraform.tfstate" 2>/dev/null || true
+      fi
+    fi
+    # Cloud Run describe
+    if [[ "$family" == "cloudrun" && -n "$resource" ]]; then
+      gcloud run services describe "$resource" --format=json >"$before_dir/service.json" 2>/dev/null || true
+      local rev
+      rev="$(python3 -c '
+import json,sys
+try:
+  d=json.load(open(sys.argv[1]))
+  print(d.get("status",{}).get("latestReadyRevisionName") or "")
+except Exception:
+  print("")
+' "$before_dir/service.json" 2>/dev/null || true)"
+      if [[ -n "$rev" ]]; then
+        echo "$rev" >"$before_dir/revision.txt"
+      fi
+    fi
+  fi
+
+  local snaps_json="[]"
+  if [[ "$family" == "bigquery" && "$action" == "rm" && -n "$resource" && -n "$eid" ]]; then
+    snaps_json="$(gcpctx_bq_prepare_delete "$eid" "$resource" "$ctx_project")"
+  elif $want_snapshot && [[ "$family" == "bigquery" && -n "$resource" && -n "$eid" ]]; then
+    snaps_json="$(gcpctx_bq_prepare_delete "$eid" "$resource" "$ctx_project")"
+  fi
+
+  if $dry_run; then
+    info "DRY-RUN — would execute: $*"
+    info "plan: family=$family action=$action resource=$resource"
+    if [[ -n "$undo_cmd" ]]; then
+      info "custom undo-cmd: $undo_cmd"
+    fi
+    local cost_file=""
+    if $install_finops; then
+      GCPCTX_INSTALL_FINOPS=1
+      export GCPCTX_INSTALL_FINOPS
+    fi
+    if gcpctx_finops_offer_install; then
+      if [[ -n "$eid" ]]; then
+        cost_file="$(gcpctx_history_entry_dir "$eid")/cost.json"
+      else
+        cost_file="$(mktemp "${GCPCTX_HOME}/tmp/cost.XXXXXX")"
+      fi
+      local region
+      region="$(json_get "$(context_meta "$name")" region)"
+      [[ -n "$region" ]] || region="US"
+      gcpctx_finops_estimate "$cost_file" "$ctx_project" "$region" "$@" || true
+      if [[ -f "$cost_file" ]]; then
+        info "cost estimate (gemlake-finops):"
+        cat "$cost_file" >&2 || true
+      fi
+    else
+      info "cost omitted (gemlake-finops unavailable)"
+    fi
+    if gcpctx_history_enabled && [[ -n "$eid" ]]; then
+      local ts pii_json argv_json
+      ts="$(python3 -c 'import datetime; print(datetime.datetime.utcnow().replace(microsecond=0).isoformat()+"Z")')"
+      pii_json="$(gcpctx_history_pii_json)"
+      argv_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")"
+      python3 -c '
+import json, sys
+id, ts, class_s, pii_s, argv_s, snaps_s, undo_cmd = sys.argv[1:8]
+ev = {
+  "id": id,
+  "ts": ts,
+  "kind": "dry_run",
+  "argv": json.loads(argv_s),
+  "cwd": json.loads(pii_s).get("cwd"),
+  "exit_code": 0,
+  "pii": json.loads(pii_s),
+  "classification": json.loads(class_s),
+  "undo": {"status": "unsupported"},
+  "snapshots": json.loads(snaps_s),
+}
+if undo_cmd:
+  ev["undo_cmd"] = undo_cmd
+print(json.dumps(ev, indent=2))
+' "$eid" "$ts" "$class_json" "$pii_json" "$argv_json" "$snaps_json" "$undo_cmd" \
+        | gcpctx_history_finalize "$eid" -
+      if [[ -n "${cost_file:-}" && -f "$cost_file" ]]; then
+        cp "$cost_file" "$(gcpctx_history_entry_dir "$eid")/cost.json" 2>/dev/null || true
+      fi
+    fi
+    return 0
+  fi
+
+  # Run child (stay parent for journaling)
+  local exit_code=0
+  local out_file err_file
+  if [[ -n "$eid" ]]; then
+    out_file="$(gcpctx_history_entry_dir "$eid")/after/stdout.txt"
+    err_file="$(gcpctx_history_entry_dir "$eid")/after/stderr.txt"
+    set +e
+    "$@" >"$out_file" 2>"$err_file"
+    exit_code=$?
+    set -e
+    # Replay captured streams to the user
+    [[ -s "$out_file" ]] && cat "$out_file"
+    [[ -s "$err_file" ]] && cat "$err_file" >&2
+  else
+    set +e
+    "$@"
+    exit_code=$?
+    set -e
+  fi
+
+  if gcpctx_history_enabled && [[ -n "$eid" ]]; then
+    local ts pii_json argv_json
+    ts="$(python3 -c 'import datetime; print(datetime.datetime.utcnow().replace(microsecond=0).isoformat()+"Z")')"
+    pii_json="$(gcpctx_history_pii_json)"
+    argv_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")"
+    # Attach cloudrun revision snapshot metadata
+    if [[ "$family" == "cloudrun" && -f "$before_dir/revision.txt" ]]; then
+      local rev
+      rev="$(tr -d '[:space:]' <"$before_dir/revision.txt")"
+      snaps_json="$(python3 -c '
+import json,sys
+snaps=json.loads(sys.argv[1]); rev=sys.argv[2]; res=sys.argv[3]
+snaps.append({"kind":"cloudrun_revision","resource":rev,"service":res})
+print(json.dumps(snaps))
+' "$snaps_json" "$rev" "$resource")"
+    fi
+    if [[ "$family" == "terraform" && -f "$before_dir/terraform.tfstate" ]]; then
+      snaps_json="$(python3 -c '
+import json,sys
+snaps=json.loads(sys.argv[1])
+snaps.append({"kind":"local_before","resource":"before/terraform.tfstate","path":None})
+print(json.dumps(snaps))
+' "$snaps_json")"
+    fi
+    python3 -c '
+import json, sys
+id, ts, class_s, pii_s, argv_s, snaps_s, undo_cmd, exit_code = sys.argv[1:9]
+ev = {
+  "id": id,
+  "ts": ts,
+  "kind": "exec",
+  "argv": json.loads(argv_s),
+  "cwd": json.loads(pii_s).get("cwd"),
+  "exit_code": int(exit_code),
+  "pii": json.loads(pii_s),
+  "classification": json.loads(class_s),
+  "undo": {"status": "ready"},
+  "snapshots": json.loads(snaps_s),
+}
+if undo_cmd:
+  ev["undo_cmd"] = undo_cmd
+if __import__("os").environ.get("GCPCTX_REPLAY_OF"):
+  ev["kind"] = "replay"
+  ev["replay_of"] = __import__("os").environ["GCPCTX_REPLAY_OF"]
+print(json.dumps(ev, indent=2))
+' "$eid" "$ts" "$class_json" "$pii_json" "$argv_json" "$snaps_json" "$undo_cmd" "$exit_code" \
+      >"$(gcpctx_history_entry_dir "$eid")/event.json.tmp"
+    # Build inverse plan
+    local inv_args=()
+    [[ -n "$undo_cmd" ]] && inv_args=(--undo-cmd "$undo_cmd")
+    python3 "$_GCPCTX_ROOT/lib/undo.py" "$(gcpctx_history_entry_dir "$eid")/event.json.tmp" ${inv_args[@]+"${inv_args[@]}"} \
+      >"$(gcpctx_history_entry_dir "$eid")/inverse.json"
+    gcpctx_chmod_600 "$(gcpctx_history_entry_dir "$eid")/inverse.json"
+    local undo_status
+    undo_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status","unsupported"))' "$(gcpctx_history_entry_dir "$eid")/inverse.json")"
+    python3 -c '
+import json, sys
+path, status = sys.argv[1], sys.argv[2]
+with open(path) as f:
+  ev = json.load(f)
+ev["undo"] = {"status": status}
+with open(path, "w") as f:
+  json.dump(ev, f, indent=2)
+  f.write("\n")
+' "$(gcpctx_history_entry_dir "$eid")/event.json.tmp" "$undo_status"
+    gcpctx_history_finalize "$eid" "$(gcpctx_history_entry_dir "$eid")/event.json.tmp"
+    rm -f "$(gcpctx_history_entry_dir "$eid")/event.json.tmp"
+  fi
+
+  return "$exit_code"
+}
+
+cmd_history() {
+  local sub="${1:-}"
+  if [[ "$sub" == "show" ]]; then
+    shift
+    local id="${1:-}"
+    [[ -n "$id" ]] || die "usage: gcpctx history show <id>"
+    gcpctx_history_show_json "$id" || die "unknown history id '$id'"
+    return 0
+  fi
+  if [[ "$sub" == "snapshots" ]]; then
+    shift
+    cmd_snapshots "$@"
+    return 0
+  fi
+  local json=false limit=50 ctx="" proj=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=true; shift ;;
+      --limit) limit="$2"; shift 2 ;;
+      --context) ctx="$2"; shift 2 ;;
+      --project) proj="$2"; shift 2 ;;
+      -*) die "unknown history flag: $1" ;;
+      *) die "usage: gcpctx history [--json] [--limit N] [--context NAME] [--project ID] | show <id> | snapshots" ;;
+    esac
+  done
+  ensure_dirs
+  if ! gcpctx_history_enabled; then
+    info "history disabled (config or GCPCTX_HISTORY=0)"
+    if $json; then echo "[]"; fi
+    return 0
+  fi
+  local data
+  data="$(gcpctx_history_list_json "$limit" "$ctx" "$proj")"
+  if $json; then
+    echo "$data"
+  else
+    python3 -c '
+import json, sys
+events = json.load(sys.stdin)
+if not events:
+    print("(no history)")
+    raise SystemExit(0)
+for ev in events:
+    argv = ev.get("argv") or []
+    cmd = " ".join(argv) if isinstance(argv, list) else str(argv)
+    if len(cmd) > 80:
+        cmd = cmd[:77] + "..."
+    undo = (ev.get("undo") or {}).get("status") or "-"
+    print("{ts}  {id}  [{kind}] exit={exit} undo={undo}  {ctx}/{proj}  {cmd}".format(
+      ts=ev.get("ts",""),
+      id=ev.get("id",""),
+      kind=ev.get("kind") or ev.get("subcommand") or "?",
+      exit=ev.get("exit_code",""),
+      undo=undo,
+      ctx=(ev.get("pii") or {}).get("context") or ev.get("context") or "-",
+      proj=(ev.get("pii") or {}).get("project") or ev.get("project") or "-",
+      cmd=cmd,
+    ))
+' <<<"$data"
+  fi
+}
+
+cmd_timeline() {
+  cmd_history "$@"
+}
+
+cmd_snapshots() {
+  local json=false proj=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=true; shift ;;
+      --project) proj="$2"; shift 2 ;;
+      -*) die "unknown snapshots flag: $1" ;;
+      *) die "usage: gcpctx snapshots [--json] [--project ID]" ;;
+    esac
+  done
+  ensure_dirs
+  export GCPCTX_BQ_TIMETRAVEL_DAYS
+  GCPCTX_BQ_TIMETRAVEL_DAYS="$(gcpctx_bq_timetravel_days)"
+  local data
+  data="$(gcpctx_history_snapshots_json "$proj")"
+  if $json; then
+    echo "$data"
+  else
+    python3 -c '
+import json, sys, datetime
+rows = json.load(sys.stdin)
+if not rows:
+    print("(no snapshots)")
+    raise SystemExit(0)
+for r in rows:
+    exists = "exists" if r.get("exists") else "missing"
+    if r.get("kind") == "bq_timetravel" and not r.get("exists"):
+        exists = "expired"
+    usable = "usable" if r.get("usable_for_undo") else "not-usable"
+    exp = r.get("expires")
+    exp_s = ""
+    if isinstance(exp, (int, float)) and exp > 1e11:
+        exp_s = datetime.datetime.utcfromtimestamp(exp/1000).isoformat() + "Z"
+    elif exp:
+        exp_s = str(exp)
+    print("{kind}: {resource}  {exists}/{usable}  event={eid}  expires={exp}".format(
+      kind=r.get("kind"),
+      resource=r.get("resource"),
+      exists=exists,
+      usable=usable,
+      eid=r.get("event_id"),
+      exp=exp_s or "-",
+    ))
+' <<<"$data"
+  fi
+}
+
+cmd_replay() {
+  local id="" ctx="" proj="" dry_run=false install_finops=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --context) ctx="$2"; shift 2 ;;
+      --project) proj="$2"; shift 2 ;;
+      --dry-run) dry_run=true; shift ;;
+      --install-finops) install_finops=true; shift ;;
+      -*) die "unknown replay flag: $1" ;;
+      *)
+        if [[ -z "$id" ]]; then id="$1"; shift
+        else die "usage: gcpctx replay <id> [--context NAME] [--project ID] [--dry-run]"; fi
+        ;;
+    esac
+  done
+  [[ -n "$id" ]] || die "usage: gcpctx replay <id> [--context NAME] [--project ID] [--dry-run]"
+  local ef
+  ef="$(gcpctx_history_entry_dir "$id")/event.json"
+  [[ -f "$ef" ]] || die "unknown history id '$id'"
+  local argv_json
+  argv_json="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("argv") or []))' "$ef")"
+  if [[ -n "$ctx" ]]; then
+    require_context "$ctx"
+    if [[ -n "$proj" ]]; then
+      eval "$(print_exports "$ctx" "$proj")"
+    else
+      eval "$(print_exports "$ctx" "")"
+    fi
+  elif [[ -n "$proj" ]]; then
+    local an
+    an="$(read_active_name)"
+    [[ -n "$an" ]] || die "no active context for --project"
+    eval "$(print_exports "$an" "$proj")"
+  fi
+  local -a replay_argv=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && replay_argv+=("$line")
+  done < <(python3 -c 'import json,sys; [print(a) for a in json.loads(sys.argv[1])]' "$argv_json")
+  [[ ${#replay_argv[@]} -gt 0 ]] || die "event has empty argv"
+  info "replaying $id: ${replay_argv[*]}"
+  export GCPCTX_REPLAY_OF="$id"
+  local -a flags=()
+  $dry_run && flags+=(--dry-run)
+  $install_finops && flags+=(--install-finops)
+  cmd_exec ${flags[@]+"${flags[@]}"} -- "${replay_argv[@]}"
+  local rc=$?
+  unset GCPCTX_REPLAY_OF
+  return "$rc"
+}
+
+cmd_undo() {
+  local id="" dry_run=false install_finops=false deny_protected=false allow_protected=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry_run=true; shift ;;
+      --install-finops) install_finops=true; shift ;;
+      --deny-protected) deny_protected=true; shift ;;
+      --allow-protected) allow_protected=true; shift ;;
+      -*) die "unknown undo flag: $1" ;;
+      *)
+        if [[ -z "$id" ]]; then id="$1"; shift
+        else die "usage: gcpctx undo [<id>] [--dry-run]"; fi
+        ;;
+    esac
+  done
+  ensure_dirs
+  if [[ -z "$id" ]]; then
+    id="$(gcpctx_history_last_ready_id)"
+  fi
+  [[ -n "$id" ]] || die "no undo-ready history entry"
+  local ef inv
+  ef="$(gcpctx_history_entry_dir "$id")/event.json"
+  inv="$(gcpctx_history_entry_dir "$id")/inverse.json"
+  [[ -f "$ef" ]] || die "unknown history id '$id'"
+  if [[ ! -f "$inv" ]]; then
+    python3 "$_GCPCTX_ROOT/lib/undo.py" "$ef" >"$inv"
+    gcpctx_chmod_600 "$inv"
+  fi
+  local status
+  status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status","unsupported"))' "$inv")"
+  if [[ "$status" == "unsupported" ]]; then
+    die "undo unsupported for event $id (see inverse.json notes)"
+  fi
+  local name
+  name="$(read_active_name)"
+  if [[ -n "$name" ]]; then
+    _gcpctx_gate_protected "$name" "$deny_protected" "$allow_protected"
+  fi
+  info "undo plan for $id:"
+  cat "$inv" >&2
+  if $dry_run; then
+    if $install_finops; then
+      export GCPCTX_INSTALL_FINOPS=1
+    fi
+    if gcpctx_finops_offer_install; then
+      local cost_file project region
+      cost_file="$(gcpctx_history_entry_dir "$id")/cost-undo.json"
+      project="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("pii") or {}).get("project") or "")' "$ef")"
+      region="US"
+      if [[ -n "$name" ]]; then
+        region="$(json_get "$(context_meta "$name")" region)"
+        [[ -n "$region" ]] || region="US"
+      fi
+      gcpctx_finops_estimate "$cost_file" "$project" "$region" undo "$id" || true
+      [[ -f "$cost_file" ]] && { info "cost:"; cat "$cost_file" >&2; }
+    fi
+    info "DRY-RUN — not applying undo"
+    return 0
+  fi
+
+  local family
+  family="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("classification") or {}).get("family") or "")' "$ef")"
+  local rc=0
+  case "$family" in
+    bigquery)
+      set +e
+      gcpctx_bq_execute_undo "$inv"
+      rc=$?
+      set -e
+      if [[ "$rc" -eq 2 ]]; then
+        gcpctx_history_set_undo_status "$id" "expired"
+        die "BQ undo expired (snapshot missing and time travel window lapsed)"
+      fi
+      ;;
+    gcpctx_local)
+      local before meta_src active_src
+      before="$(gcpctx_history_entry_dir "$id")/before"
+      meta_src="$before/meta.json"
+      active_src="$before/active"
+      if [[ -f "$meta_src" ]]; then
+        local ctx_name
+        ctx_name="$(json_get "$meta_src" name)"
+        if [[ -n "$ctx_name" ]] && context_exists "$ctx_name"; then
+          cp "$meta_src" "$(context_meta "$ctx_name")"
+          gcpctx_chmod_600 "$(context_meta "$ctx_name")"
+        fi
+      fi
+      if [[ -f "$active_src" ]]; then
+        cp "$active_src" "$ACTIVE_FILE"
+      fi
+      info "restored local context from before/ snapshot"
+      ;;
+    *)
+      # Execute shell / gcloud steps from inverse
+      set +e
+      python3 -c '
+import json, sys, subprocess, shlex, os
+inv = json.load(open(sys.argv[1]))
+ev = json.load(open(sys.argv[2]))
+for step in inv.get("steps") or []:
+    t = step.get("type")
+    if t == "shell_string":
+        r = subprocess.run(step["cmd"], shell=True)
+        if r.returncode != 0:
+            raise SystemExit(r.returncode)
+    elif t == "shell":
+        r = subprocess.run(step.get("argv") or [])
+        if r.returncode != 0:
+            raise SystemExit(r.returncode)
+    elif t == "gcloud":
+        r = subprocess.run(["gcloud"] + list(step.get("argv") or []))
+        if r.returncode != 0:
+            raise SystemExit(r.returncode)
+    elif t == "gcloud_invert_iam":
+        argv = list(ev.get("argv") or [])
+        frm, to = step["from"], step["to"]
+        argv = [to if a == frm else a for a in argv]
+        # drop leading gcloud if present — we add it
+        if argv and argv[0].endswith("gcloud"):
+            argv = argv[1:]
+        r = subprocess.run(["gcloud"] + argv)
+        if r.returncode != 0:
+            raise SystemExit(r.returncode)
+    elif t == "terraform_state_restore":
+        src = os.path.join(os.path.dirname(sys.argv[2]), step.get("state_snapshot") or "before/terraform.tfstate")
+        # event.json is in entries/id/; before is sibling
+        entry = os.path.dirname(sys.argv[2])
+        src = os.path.join(entry, "before", "terraform.tfstate")
+        cwd = step.get("cwd") or ev.get("cwd") or "."
+        dst = os.path.join(cwd, "terraform.tfstate")
+        if not os.path.isfile(src):
+            print("missing terraform state snapshot", file=sys.stderr)
+            raise SystemExit(1)
+        import shutil
+        shutil.copy2(src, dst)
+        print(f"restored {dst} from snapshot; run terraform apply manually to converge", file=sys.stderr)
+    elif t == "restore_local_meta":
+        pass  # handled in bash for gcpctx_local
+    else:
+        print(f"unknown step type {t}", file=sys.stderr)
+        raise SystemExit(1)
+' "$inv" "$ef"
+      rc=$?
+      set -e
+      ;;
+  esac
+  if [[ "$rc" -ne 0 ]]; then
+    die "undo failed for $id (exit $rc)"
+  fi
+  gcpctx_history_set_undo_status "$id" "applied"
+  # Journal the undo as a new event
+  if gcpctx_history_enabled; then
+    local uid
+    uid="$(gcpctx_history_begin)"
+    local ts pii_json
+    ts="$(python3 -c 'import datetime; print(datetime.datetime.utcnow().replace(microsecond=0).isoformat()+"Z")')"
+    pii_json="$(gcpctx_history_pii_json)"
+    python3 -c '
+import json, sys
+uid, ts, pii_s, orig = sys.argv[1:5]
+ev = {
+  "id": uid,
+  "ts": ts,
+  "kind": "undo",
+  "argv": ["undo", orig],
+  "cwd": json.loads(pii_s).get("cwd"),
+  "exit_code": 0,
+  "pii": json.loads(pii_s),
+  "classification": {"family": "gcpctx_local", "action": "undo"},
+  "undo": {"status": "unsupported"},
+  "undo_of": orig,
+  "snapshots": [],
+}
+print(json.dumps(ev, indent=2))
+' "$uid" "$ts" "$pii_json" "$id" | gcpctx_history_finalize "$uid" -
+  fi
+  info "undo applied for $id"
 }
 
 cmd_scan() {
@@ -1234,6 +1822,17 @@ cmd_doctor() {
     done
   fi
 
+  if [[ -d "$GCPCTX_HOME/history" ]]; then
+    local hmode
+    hmode="$(file_mode_octal "$GCPCTX_HOME/history")"
+    if $perms_ok && mode_too_open "$hmode"; then
+      gcpctx_doctor_add HISTORY_PERMS_OPEN error "history dir group/world-accessible (mode $hmode); run: gcpctx secrets fix" "$GCPCTX_HOME/history"
+    fi
+    if ! $json; then
+      echo "history: $GCPCTX_HOME/history (mode=$hmode)"
+    fi
+  fi
+
   if [[ -z "$name" ]]; then
     gcpctx_doctor_add NO_ACTIVE_CONTEXT warn "no active gcpctx context"
   else
@@ -1315,6 +1914,15 @@ cmd_secrets_fix() {
   chmod 700 "$CONTEXTS_DIR" 2>/dev/null || true
   mkdir -p "$GCPCTX_HOME/tmp"
   chmod 700 "$GCPCTX_HOME/tmp" 2>/dev/null || true
+  if [[ -d "$GCPCTX_HOME/history" ]]; then
+    chmod 700 "$GCPCTX_HOME/history" 2>/dev/null || true
+    chmod 700 "$GCPCTX_HOME/history/entries" 2>/dev/null || true
+    find "$GCPCTX_HOME/history" -type f -exec chmod 600 {} \; 2>/dev/null || true
+    find "$GCPCTX_HOME/history" -type d -exec chmod 700 {} \; 2>/dev/null || true
+  fi
+  if [[ -f "$GCPCTX_HOME/config.json" ]]; then
+    chmod 600 "$GCPCTX_HOME/config.json" 2>/dev/null || true
+  fi
   local d cred
   shopt -s nullglob
   for d in "$CONTEXTS_DIR"/*/; do
@@ -1591,6 +2199,14 @@ main() {
     fi
   done
 
+  # Commands that must not recurse into history recording
+  local skip_history=false
+  case "$cmd" in
+    help|--help|-h|version|--version|-V|completion|history|timeline|snapshots|which) skip_history=true ;;
+  esac
+
+  local exit_code=0
+  set +e
   case "$cmd" in
     init) cmd_init ${args[@]+"${args[@]}"} ;;
     login) cmd_login ${args[@]+"${args[@]}"} ;;
@@ -1604,6 +2220,11 @@ main() {
     current|status) cmd_current ${args[@]+"${args[@]}"} ;;
     env) cmd_env ${args[@]+"${args[@]}"} ;;
     exec) cmd_exec ${args[@]+"${args[@]}"} ;;
+    history) cmd_history ${args[@]+"${args[@]}"} ;;
+    timeline) cmd_timeline ${args[@]+"${args[@]}"} ;;
+    snapshots) cmd_snapshots ${args[@]+"${args[@]}"} ;;
+    replay) cmd_replay ${args[@]+"${args[@]}"} ;;
+    undo) cmd_undo ${args[@]+"${args[@]}"} ;;
     protect) cmd_protect ${args[@]+"${args[@]}"} ;;
     unprotect) cmd_unprotect ${args[@]+"${args[@]}"} ;;
     assert) cmd_assert ${args[@]+"${args[@]}"} ;;
@@ -1619,6 +2240,18 @@ main() {
     help|--help|-h) usage ;;
     *) die "unknown command '$cmd' (try: gcpctx help)" ;;
   esac
+  exit_code=$?
+  set -e
+
+  # Journal non-exec mutating/read commands (exec journals itself).
+  # Skip when --export so stdout stays eval-safe.
+  if ! $skip_history && ! $want_export && [[ "$cmd" != "exec" && "$cmd" != "replay" && "$cmd" != "undo" ]]; then
+    if gcpctx_history_enabled 2>/dev/null; then
+      gcpctx_history_record_simple "$cmd" "$exit_code" ${args[@]+"${args[@]}"} >/dev/null 2>&1 || true
+    fi
+  fi
+
+  return "$exit_code"
 }
 
 main "$@"

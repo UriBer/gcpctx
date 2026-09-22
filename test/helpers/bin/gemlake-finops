@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Stub gemlake-finops for dry-run cost tests.
+set -eo pipefail
+cmd="${1:-}"
+if [[ "$cmd" == "estimate" || "$cmd" == "dry-run" ]]; then
+  cat <<'EOF'
+{
+  "status": "ok",
+  "engine": "gemlake-finops-stub",
+  "usd": 0.01,
+  "evidenceType": "dry_run",
+  "warnings": [],
+  "assumptions": ["stub estimate for tests"]
+}
+EOF
+  exit 0
+fi
+echo "gemlake-finops-stub: unknown command $cmd" >&2
+exit 1

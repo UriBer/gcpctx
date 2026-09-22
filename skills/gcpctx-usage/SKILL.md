@@ -143,9 +143,25 @@ gcpctx assert --context dev && terraform apply
 ```bash
 # Only run command if in specific context
 gcpctx exec --require-context dev -- gcloud compute instances delete my-instance
+
+# Dry-run (cost via gemlake-finops if installed; offers install otherwise)
+gcpctx exec --dry-run -- bq query --use_legacy_sql=false 'SELECT 1'
 ```
 
 If current context is not `dev`, the command will not execute.
+
+### History, snapshots, undo, replay
+
+History is **on by default** (disable with `GCPCTX_HISTORY=0` or `config.json`). Journals argv + account/project — never credential bodies.
+
+```bash
+gcpctx history [--json]
+gcpctx snapshots              # BQ snapshot / time-travel restore points still usable?
+gcpctx undo                   # undo last ready event (or pass id)
+gcpctx replay <id> --project other-project
+```
+
+BQ `bq rm` under `gcpctx exec` records time travel + optional snapshot table; undo restores with `bq cp`.
 
 ## Troubleshooting
 

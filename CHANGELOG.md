@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- Command **history** (on by default): `$GCPCTX_HOME/history/` journals argv + account/project PII; opt out with `GCPCTX_HISTORY=0` or `config.json` `history.enabled: false`
+- `gcpctx history`, `timeline`, `snapshots`, `replay`, `undo`
+- `gcpctx exec` wraps the child (no longer process-replaces) so outcomes can be journaled; supports `--dry-run`, `--snapshot`, `--undo-cmd`
+- Classifier + inverse plans for local context, Cloud Run, BigQuery, IAM, GCS, Compute, Terraform
+- BigQuery deletes: pre-delete snapshot table + time travel (`bq cp table@ms`); `gcpctx snapshots` shows what still exists
+- Cost dry-run delegates to **gemlake-finops** (offers install if missing; never invents USD)
+
+### Security
+- History store hardened via `secrets fix` and doctor `HISTORY_PERMS_OPEN`
+- History never stores ADC secret fields; separate from `current`/`env` JSON APIs
+
 ## 0.3.0 — 2026-07-31
 
 ### Security

@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Deterministic fake bq for tests — never touches real BigQuery.
+set -eo pipefail
+# Strip common flags
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --format|--project_id|--dataset_id|--location|--use_legacy_sql|--quiet)
+      shift
+      [[ $# -gt 0 && "$1" != --* ]] && shift || true
+      ;;
+    --format=*|--project_id=*|--use_legacy_sql=*|--quiet)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+cmd="${1:-}"
+shift || true
+FAKE_BQ_STATE="${FAKE_BQ_STATE:-${GCPCTX_HOME:-/tmp}/fake-bq-state}"
+mkdir -p "$FAKE_BQ_STATE"
+
+case "$cmd" in
+  show)
+    tid="${1:-}"
+    # strip @timestamp
+    tid="${tid%%@*}"
+    safe="$(echo "$tid" | tr ':/.' '___')"
+    if [[ -f "$FAKE_BQ_STATE/$safe.exists" || -f "$FAKE_BQ_STATE/${safe}.json" ]]; then
+      echo "{\"id\":\"$tid\",\"type\":\"TABLE\"}"
+      exit 0
+    fi
+    # default: pretend table exists unless marked deleted
+    if [[ -f "$FAKE_BQ_STATE/$safe.deleted" ]]; then
+      echo "Not found: $tid" >&2
+      exit 1
+    fi
+    echo "{\"id\":\"$tid\",\"type\":\"TABLE\"}"
+    touch "$FAKE_BQ_STATE/$safe.exists"
+    exit 0
+    ;;
+  rm)
+    while [[ $# -gt 0 && "$1" == -* ]]; do shift; done
+    tid="${1:-}"
+    safe="$(echo "$tid" | tr ':/.' '___')"
+    rm -f "$FAKE_BQ_STATE/$safe.exists"
+    touch "$FAKE_BQ_STATE/$safe.deleted"
+    exit 0
+    ;;
+  mk)
+    while [[ $# -gt 0 && "$1" == -* ]]; do shift; done
+    tid="${1:-}"
+    safe="$(echo "$tid" | tr ':/.' '___')"
+    touch "$FAKE_BQ_STATE/$safe.exists"
+    rm -f "$FAKE_BQ_STATE/$safe.deleted"
+    exit 0
+    ;;
+  cp)
+    # bq cp [-n] src dst
+    while [[ $# -gt 0 && "$1" == -* ]]; do shift; done
+    src="${1:-}"
+    dst="${2:-}"
+    src_base="${src%%@*}"
+    dst_safe="$(echo "$dst" | tr ':/.' '___')"
+    # Allow restore from @timestamp or snapshot
+    touch "$FAKE_BQ_STATE/$dst_safe.exists"
+    rm -f "$FAKE_BQ_STATE/$dst_safe.deleted"
+    echo "Table $dst successfully copied from $src"
+    exit 0
+    ;;
+  query)
+    # CREATE SNAPSHOT TABLE success by default
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac

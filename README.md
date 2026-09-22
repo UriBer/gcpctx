@@ -44,6 +44,7 @@ WinGet: not offered yet — see `packaging/winget/README.md`
 - Credential **paths** may be printed; credential **bodies** are never printed
 - No telemetry
 - Protected contexts, `assert`, and `exec --require-context` for scripts/agents
+- Command **history** (on by default) journals argv + account/project PII under `$GCPCTX_HOME/history/` — never ADC bodies. Disable with `GCPCTX_HISTORY=0` or `config.json` `history.enabled: false`
 - See [SECURITY.md](SECURITY.md)
 
 This does **not** make every command safe. Apply IAM least privilege.
@@ -56,6 +57,13 @@ gcpctx use prod --project other-id
 gcpctx protect prod
 gcpctx assert --context prod --project other-id
 gcpctx exec --require-context prod -- terraform apply
+
+# History / undo / cost dry-run
+gcpctx history
+gcpctx snapshots
+gcpctx exec --dry-run -- bq query --use_legacy_sql=false 'SELECT 1'
+gcpctx undo
+gcpctx replay <id> --project other-id
 ```
 
 Repo marker (safe to commit):
@@ -64,6 +72,17 @@ Repo marker (safe to commit):
 {"name":"dev","project":"example-dev-123456"}
 ```
 
+### History and rollback
+
+| Command | Purpose |
+|---------|---------|
+| `gcpctx history [--json]` | Timeline of recorded commands (PII included) |
+| `gcpctx snapshots` | Which BQ snapshot / time-travel restore points still exist |
+| `gcpctx undo [<id>]` | Apply inverse plan (local meta, BQ time travel, classified gcloud, …) |
+| `gcpctx replay <id>` | Re-run argv, optionally with another context/project |
+| `gcpctx exec --dry-run -- …` | Print plan; cost via **gemlake-finops** (offers install if missing) |
+
+BQ table deletes journal `deleted_at` and optionally create a snapshot table; undo prefers the snapshot, then `bq cp table@timestamp` while time travel remains valid.
 ## Platform support
 
 | Platform | Support |

@@ -37,6 +37,10 @@ We aim to acknowledge reports within 7 days.
 18. Release artifacts are checksummed; provenance via CI when configured.
 19. Runtime dependencies are minimized (Bash, Python 3, gcloud).
 20. Security behavior is covered by automated tests.
+21. History journals may store account/project/argv PII under `$GCPCTX_HOME/history/` (mode `0700`/`0600`) but never ADC bodies or secret fields.
+22. `current --json` / `env --json` remain path/id-only; history is a separate API (`gcpctx history`).
+23. Cost dry-run never invents USD; it delegates to gemlake-finops or omits cost.
+24. Undo fails closed for unsupported families; BQ delete undo requires an existing snapshot or in-window time travel.
 
 ## What gcpctx does *not* guarantee
 
@@ -44,6 +48,7 @@ We aim to acknowledge reports within 7 days.
 - It does not replace IAM least privilege.
 - It cannot stop a process that ignores environment variables and uses another credential path.
 - A compromised machine or malicious `gcloud` binary is outside the trust model.
+- History undo cannot reconstruct arbitrary cloud state: unclassified scripts need `--undo-cmd`; BQ deletes expire after the time-travel window if no snapshot remains; unversioned GCS deletes need a prior `before/` copy.
 
 ## Supported platforms (security posture)
 

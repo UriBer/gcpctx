@@ -14,6 +14,20 @@ Prevent accidental operations in production GCP environments using gcpctx safety
 - User asks about preventing production accidents
 - User needs to ensure commands run in the correct GCP context
 - User wants fail-fast behavior for context mismatches
+- User wants to dry-run, undo, or audit recent gcpctx/exec mutations
+
+## History and undo (audit)
+
+Prefer journaling via `gcpctx exec` so cloud mutations can be undone:
+
+```bash
+gcpctx exec --dry-run --deny-protected -- bq rm -f project:dataset.table
+gcpctx exec --deny-protected -- bq rm -f project:dataset.table
+gcpctx snapshots
+gcpctx undo
+```
+
+Disable journaling only when required: `GCPCTX_HISTORY=0`. History stores account/project/argv under `$GCPCTX_HOME/history/` — never paste credential files; history PII is still sensitive.
 
 ## Safety Mechanisms
 

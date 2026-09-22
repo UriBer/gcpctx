@@ -6,9 +6,10 @@
 4. Complete [owner runbook](owner-runbook.md) security + npm steps
 5. Tag `vX.Y.Z` and push tags
 6. GitHub Actions Release builds archives, checksums, SBOM, attestations
-7. Set repository variable `NPM_PUBLISH=true` and configure trusted publisher / `NPM_TOKEN` for npm
-8. Update Homebrew formula SHA in `UriBer/homebrew-tap`
-9. Update Scoop hash in `UriBer/scoop-gcpctx`
+7. Pushing the new `vX.Y.Z` tag posts a changelog summary to https://x.com/di2ops from this Mac when the GitHub repository is public. Preview: `python3 scripts/announce-x-release.py summary X.Y.Z`
+8. Set repository variable `NPM_PUBLISH=true` and configure trusted publisher / `NPM_TOKEN` for npm
+9. Update Homebrew formula SHA in `UriBer/homebrew-tap`
+10. Update Scoop hash in `UriBer/scoop-gcpctx`
 
 ## Rollback
 

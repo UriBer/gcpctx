@@ -43,6 +43,21 @@ Automations in CI handle most packaging; a few steps need human credentials or o
 4. Set repository variable `NPM_PUBLISH=true` only when ready to publish on tag
 5. Tag release: `git tag v0.3.0 && git push origin v0.3.0`
 
+## X announcement (@di2ops)
+
+Pushing a new `vX.Y.Z` tag from this Mac posts a short changelog summary to
+https://x.com/di2ops when the GitHub repository is public. Private and internal
+repositories are skipped. The poster is the Firefox profile already signed in as
+@di2ops, via the personal Cursor skill `post-to-x`
+(`~/.cursor/skills/post-to-x/`). The same git pre-push hook covers every
+repository, including ones created later. It does not store API keys.
+
+```bash
+python3 scripts/announce-x-release.py summary X.Y.Z
+```
+
+Log: `~/Library/Logs/x-post-hook.log`.
+
 ## GitHub Release / Homebrew / Scoop
 
 1. Push tag `v0.3.0` → Release workflow builds archives, checksums, SBOM, attestations

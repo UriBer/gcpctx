@@ -13,3 +13,4 @@ credentials.json
 node_modules/
 dist/
 .gcpctx
+scripts/__pycache__/

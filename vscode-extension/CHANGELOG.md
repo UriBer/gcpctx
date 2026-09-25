@@ -2,6 +2,12 @@
 
 All notable changes to the "gcpctx-skills" extension will be documented in this file.
 
+## [1.0.2] - 2026-09-25
+
+### Added
+- Usage skill: `gcpctx history`, `snapshots`, `undo`, and `replay`, plus `exec --dry-run`
+- Safety skill: dry-run, undo, and audit guidance for `gcpctx exec` mutations
+
 ## [1.0.1] - 2026-08-04
 
 ### Changed
